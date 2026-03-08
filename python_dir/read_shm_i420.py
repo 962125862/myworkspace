@@ -125,7 +125,14 @@ def read_latest_i420(mm):
 
     return hdr, sh2, y, u, v
 
-
+def i420_to_bgr(y, u, v):
+    h, w = y.shape
+    i420 = np.empty((h * 3 // 2, w), dtype=np.uint8)
+    i420[:h, :] = y
+    i420[h:h + h // 4, :] = u.reshape(-1, w)
+    i420[h + h // 4:, :] = v.reshape(-1, w)
+    bgr = cv2.cvtColor(i420, cv2.COLOR_YUV2BGR_I420)
+    return bgr
 def main():
     mm = open_shm()
     last_frame_id = -1
@@ -152,9 +159,9 @@ def main():
             print(f"reader fps ~= {fps_count}, latest_frame_id={sh.frame_id}")
             fps_t0 = now
             fps_count = 0
-
+        frame_bgr=i420_to_bgr(y, u, v)
         # 先只显示 Y 平面（灰度）
-        cv2.imshow("Y", y)
+        cv2.imshow("Y", frame_bgr)
 
         key = cv2.waitKey(1) & 0xFF
         if key == 27 or key == ord('q'):

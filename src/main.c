@@ -5,7 +5,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdbool.h>
-
+#include "control_socket.h"
 #include <Limelight.h>
 #include "client.h"
 
@@ -33,6 +33,9 @@ typedef struct {
     int ll_color_range;
     uint32_t shm_color_space;
     uint32_t shm_color_range;
+    const char* control_bind;
+    int control_port;
+
 } AppOptions;
 
 static void on_signal(int sig) {
@@ -173,6 +176,9 @@ static void options_defaults(AppOptions* o) {
     o->ll_color_range = default_limelight_color_range();
     o->shm_color_space = ML_COLOR_SPACE_BT709;
     o->shm_color_range = ML_COLOR_RANGE_LIMITED;
+    o->control_bind = "127.0.0.1";
+    o->control_port = 0;   /* 0 = disabled */
+
 }
 
 static void print_usage(const char* argv0) {
@@ -192,6 +198,8 @@ static void print_usage(const char* argv0) {
             "  --packet-size <n>         default: 1024\n"
             "  --colorspace <601|709>    default: 709\n"
             "  --range <limited|full>    default: limited\n"
+            "  --control-bind <ip>        default: 127.0.0.1\n"
+            "  --control-port <port>      default: 0 (disabled)\n"
             "\n"
             "examples:\n"
             "  %s 192.168.11.50 Desktop\n"
@@ -225,6 +233,10 @@ static int parse_args(int argc, char** argv, AppOptions* o) {
                 o->bitrate = atoi(argv[++i]);
             } else if (!strcmp(argv[i], "--packet-size") && i + 1 < argc) {
                 o->packet_size = atoi(argv[++i]);
+            } else if (!strcmp(argv[i], "--control-bind") && i + 1 < argc) {
+                o->control_bind = argv[++i];
+            } else if (!strcmp(argv[i], "--control-port") && i + 1 < argc) {
+                o->control_port = atoi(argv[++i]);
             } else if (!strcmp(argv[i], "--colorspace") && i + 1 < argc) {
                 if (parse_color_space_arg(argv[++i], &o->ll_color_space, &o->shm_color_space) != 0) {
                     fprintf(stderr, "invalid --colorspace\n");
@@ -260,6 +272,10 @@ static int parse_args(int argc, char** argv, AppOptions* o) {
         fprintf(stderr, "--shm-name must start with '/'\n");
         return -1;
     }
+    if (o->control_port < 0 || o->control_port > 65535) {
+        fprintf(stderr, "invalid --control-port\n");
+        return -1;
+    }
 
     return 0;
 }
@@ -275,10 +291,12 @@ int main(int argc, char** argv) {
     signal(SIGTERM, on_signal);
 
     fprintf(stderr,
-            "options: host=%s app=%s shm=%s %dx%d@%d bitrate=%d cs=%u range=%u key_dir=%s\n",
+            "options: host=%s app=%s shm=%s %dx%d@%d bitrate=%d cs=%u range=%u key_dir=%s control=%s:%d\n",
             opt.host, opt.app, opt.shm_name,
             opt.width, opt.height, opt.fps, opt.bitrate,
-            opt.shm_color_space, opt.shm_color_range, opt.key_dir);
+            opt.shm_color_space, opt.shm_color_range, opt.key_dir,
+            opt.control_bind, opt.control_port);
+
 
     SERVER_DATA server;
     memset(&server, 0, sizeof(server));
@@ -360,22 +378,44 @@ int main(int argc, char** argv) {
         connection_callbacks_set_fatal_code(NULL);
         return 6;
     }
+    ControlSocket control_socket;
+    memset(&control_socket, 0, sizeof(control_socket));
+    control_socket.fd = -1;
+
+    int control_enabled = 0;
+    if (opt.control_port > 0) {
+        if (control_socket_open(&control_socket, opt.control_bind, (uint16_t)opt.control_port) != 0) {
+            fprintf(stderr, "control socket open failed\n");
+            connection_callbacks_set_fatal_code(NULL);
+            LiStopConnection();
+            return 7;
+        }
+        control_enabled = 1;
+    }
 
     fprintf(stderr, "streaming started, press Ctrl+C to stop\n");
 
     int exit_code = 0;
 
     while (g_running) {
+        if (control_enabled) {
+            control_socket_process_all(&control_socket, opt.width, opt.height);
+        }
+
         if (fatal_code != WORKER_FATAL_NONE) {
             fprintf(stderr, "fatal_code=%d, stopping worker\n", fatal_code);
             exit_code = 100 + fatal_code;
             break;
         }
-
-        usleep(10000);
+        usleep(control_enabled ? 2000 : 10000);
     }
 
+
     connection_callbacks_set_fatal_code(NULL);
+    if (control_enabled) {
+        control_socket_close(&control_socket);
+    }
+
     LiStopConnection();
 
     return exit_code;

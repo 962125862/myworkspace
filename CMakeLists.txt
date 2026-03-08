@@ -18,6 +18,7 @@ add_executable(ml_worker
         src/video_callbacks.c
         src/connection_callbacks.c
         src/shm_writer.c
+        src/control_socket.c
 )
 
 
