@@ -174,6 +174,7 @@ class WorkerInputClient:
 
 
 if __name__ == "__main__":
+    time.sleep(1)
     c = WorkerInputClient(port=50001)
 
     # 鼠标

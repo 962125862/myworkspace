@@ -5,13 +5,15 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdbool.h>
-#include "control_socket.h"
+#include <time.h>
+
 #include <Limelight.h>
 #include "client.h"
 
 #include "connection_callbacks.h"
 #include "video_callbacks.h"
 #include "worker_defs.h"
+#include "control_socket.h"
 
 extern char* gs_error;
 
@@ -33,10 +35,21 @@ typedef struct {
     int ll_color_range;
     uint32_t shm_color_space;
     uint32_t shm_color_range;
+
     const char* control_bind;
     int control_port;
+} StreamOptions;
 
-} AppOptions;
+typedef struct {
+    const char* host;
+    const char* key_dir;
+    const char* pin;
+} PairOptions;
+
+typedef struct {
+    const char* host;
+    const char* key_dir;
+} ListOptions;
 
 static void on_signal(int sig) {
     (void)sig;
@@ -57,6 +70,34 @@ static bool is_all_digits(const char* s) {
     return true;
 }
 
+static const char* default_key_dir(void) {
+    static char buf[512];
+    static int initialized = 0;
+
+    if (!initialized) {
+        const char* home = getenv("HOME");
+        if (home && *home) {
+            snprintf(buf, sizeof(buf), "%s/.cache/moonlight", home);
+        } else {
+            snprintf(buf, sizeof(buf), "./keys");
+        }
+        initialized = 1;
+    }
+
+    return buf;
+}
+
+static void generate_pair_pin(char out[5]) {
+    static int seeded = 0;
+    if (!seeded) {
+        seeded = 1;
+        srand((unsigned int)(time(NULL) ^ (unsigned int)getpid()));
+    }
+
+    unsigned int pin = (unsigned int)(rand() % 10000);
+    snprintf(out, 5, "%04u", pin);
+}
+
 static int resolve_app_id(PSERVER_DATA server, const char* app_arg) {
     PAPP_LIST app_list = NULL;
 
@@ -70,14 +111,15 @@ static int resolve_app_id(PSERVER_DATA server, const char* app_arg) {
 
     int index = 1;
     for (PAPP_LIST p = app_list; p != NULL; p = p->next, index++) {
-        fprintf(stderr, "[%d] real_app_id=%d name=%s\n", index, p->id, p->name);
+        fprintf(stderr, "[%d] real_app_id=%d name=%s\n",
+                index, p->id, p->name ? p->name : "(null)");
 
         if (by_index) {
             if (index == wanted_index) {
                 return p->id;
             }
         } else {
-            if (strcmp(p->name, app_arg) == 0) {
+            if (p->name && strcmp(p->name, app_arg) == 0) {
                 return p->id;
             }
         }
@@ -160,10 +202,10 @@ static int parse_color_range_arg(const char* s, int* out_ll, uint32_t* out_shm) 
     return -1;
 }
 
-static void options_defaults(AppOptions* o) {
+static void stream_options_defaults(StreamOptions* o) {
     memset(o, 0, sizeof(*o));
 
-    o->key_dir = "/home/gejun/.cache/moonlight";
+    o->key_dir = default_key_dir();
     snprintf(o->shm_name, sizeof(o->shm_name), "/ml_stream_00");
 
     o->width = 1280;
@@ -176,19 +218,30 @@ static void options_defaults(AppOptions* o) {
     o->ll_color_range = default_limelight_color_range();
     o->shm_color_space = ML_COLOR_SPACE_BT709;
     o->shm_color_range = ML_COLOR_RANGE_LIMITED;
-    o->control_bind = "127.0.0.1";
-    o->control_port = 0;   /* 0 = disabled */
 
+    o->control_bind = "127.0.0.1";
+    o->control_port = 0;
+}
+
+static void pair_options_defaults(PairOptions* o) {
+    memset(o, 0, sizeof(*o));
+    o->key_dir = default_key_dir();
+}
+
+static void list_options_defaults(ListOptions* o) {
+    memset(o, 0, sizeof(*o));
+    o->key_dir = default_key_dir();
 }
 
 static void print_usage(const char* argv0) {
     fprintf(stderr,
             "usage:\n"
+            "  %s pair <host> [pin] [--key-dir <path>]\n"
+            "  %s list <host> [--key-dir <path>]\n"
             "  %s <host> <app_index_or_name>\n"
-            "or\n"
-            "  %s --host <ip> --app <name_or_index> [options]\n"
+            "  %s stream --host <ip> --app <name_or_index> [options]\n"
             "\n"
-            "options:\n"
+            "stream options:\n"
             "  --key-dir <path>\n"
             "  --shm-name <name>         default: /ml_stream_00\n"
             "  --width <n>               default: 1280\n"
@@ -198,17 +251,78 @@ static void print_usage(const char* argv0) {
             "  --packet-size <n>         default: 1024\n"
             "  --colorspace <601|709>    default: 709\n"
             "  --range <limited|full>    default: limited\n"
-            "  --control-bind <ip>        default: 127.0.0.1\n"
-            "  --control-port <port>      default: 0 (disabled)\n"
+            "  --control-bind <ip>       default: 127.0.0.1\n"
+            "  --control-port <port>     default: 0 (disabled)\n"
             "\n"
             "examples:\n"
+            "  %s pair 192.168.11.50\n"
+            "  %s list 192.168.11.50\n"
             "  %s 192.168.11.50 Desktop\n"
-            "  %s --host 192.168.11.50 --app Desktop --shm-name /ml_stream_00\n",
-            argv0, argv0, argv0, argv0);
+            "  %s stream --host 192.168.11.50 --app Desktop --control-port 50001\n",
+            argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
-static int parse_args(int argc, char** argv, AppOptions* o) {
-    options_defaults(o);
+static int parse_pair_args(int argc, char** argv, PairOptions* o) {
+    pair_options_defaults(o);
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--host") && i + 1 < argc) {
+            o->host = argv[++i];
+        } else if (!strcmp(argv[i], "--key-dir") && i + 1 < argc) {
+            o->key_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--pin") && i + 1 < argc) {
+            o->pin = argv[++i];
+        } else if (argv[i][0] != '-' && !o->host) {
+            o->host = argv[i];
+        } else if (argv[i][0] != '-' && !o->pin) {
+            o->pin = argv[i];
+        } else {
+            fprintf(stderr, "unknown or incomplete pair argument: %s\n", argv[i]);
+            return -1;
+        }
+    }
+
+    if (!o->host) {
+        fprintf(stderr, "pair: missing host\n");
+        return -1;
+    }
+
+    if (o->pin) {
+        if (!is_all_digits(o->pin) || strlen(o->pin) != 4) {
+            fprintf(stderr, "pair: pin must be exactly 4 digits\n");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int parse_list_args(int argc, char** argv, ListOptions* o) {
+    list_options_defaults(o);
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--host") && i + 1 < argc) {
+            o->host = argv[++i];
+        } else if (!strcmp(argv[i], "--key-dir") && i + 1 < argc) {
+            o->key_dir = argv[++i];
+        } else if (argv[i][0] != '-' && !o->host) {
+            o->host = argv[i];
+        } else {
+            fprintf(stderr, "unknown or incomplete list argument: %s\n", argv[i]);
+            return -1;
+        }
+    }
+
+    if (!o->host) {
+        fprintf(stderr, "list: missing host\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
+    stream_options_defaults(o);
 
     if (argc == 3 && argv[1][0] != '-' && argv[2][0] != '-') {
         o->host = argv[1];
@@ -233,10 +347,6 @@ static int parse_args(int argc, char** argv, AppOptions* o) {
                 o->bitrate = atoi(argv[++i]);
             } else if (!strcmp(argv[i], "--packet-size") && i + 1 < argc) {
                 o->packet_size = atoi(argv[++i]);
-            } else if (!strcmp(argv[i], "--control-bind") && i + 1 < argc) {
-                o->control_bind = argv[++i];
-            } else if (!strcmp(argv[i], "--control-port") && i + 1 < argc) {
-                o->control_port = atoi(argv[++i]);
             } else if (!strcmp(argv[i], "--colorspace") && i + 1 < argc) {
                 if (parse_color_space_arg(argv[++i], &o->ll_color_space, &o->shm_color_space) != 0) {
                     fprintf(stderr, "invalid --colorspace\n");
@@ -247,19 +357,24 @@ static int parse_args(int argc, char** argv, AppOptions* o) {
                     fprintf(stderr, "invalid --range\n");
                     return -1;
                 }
+            } else if (!strcmp(argv[i], "--control-bind") && i + 1 < argc) {
+                o->control_bind = argv[++i];
+            } else if (!strcmp(argv[i], "--control-port") && i + 1 < argc) {
+                o->control_port = atoi(argv[++i]);
             } else {
-                fprintf(stderr, "unknown or incomplete argument: %s\n", argv[i]);
+                fprintf(stderr, "unknown or incomplete stream argument: %s\n", argv[i]);
                 return -1;
             }
         }
     }
 
     if (!o->host || !o->app) {
+        fprintf(stderr, "stream: missing host or app\n");
         return -1;
     }
 
     if (o->width <= 0 || o->height <= 0 || o->fps <= 0 || o->bitrate <= 0 || o->packet_size <= 0) {
-        fprintf(stderr, "invalid numeric options\n");
+        fprintf(stderr, "invalid numeric stream options\n");
         return -1;
     }
 
@@ -272,6 +387,7 @@ static int parse_args(int argc, char** argv, AppOptions* o) {
         fprintf(stderr, "--shm-name must start with '/'\n");
         return -1;
     }
+
     if (o->control_port < 0 || o->control_port > 65535) {
         fprintf(stderr, "invalid --control-port\n");
         return -1;
@@ -280,23 +396,89 @@ static int parse_args(int argc, char** argv, AppOptions* o) {
     return 0;
 }
 
-int main(int argc, char** argv) {
-    AppOptions opt;
-    if (parse_args(argc, argv, &opt) != 0) {
-        print_usage(argv[0]);
-        return 1;
+static int run_pair_command(const PairOptions* opt) {
+    SERVER_DATA server;
+    memset(&server, 0, sizeof(server));
+
+    if (gs_init(&server, (char*)opt->host, 0, opt->key_dir, 1, false) != 0) {
+        fprintf(stderr, "gs_init failed: %s\n", gs_error ? gs_error : "(null)");
+        return 2;
     }
 
+    fprintf(stderr, "server appversion=%s paired=%d\n",
+            server.serverInfo.serverInfoAppVersion ? server.serverInfo.serverInfoAppVersion : "(null)",
+            server.paired ? 1 : 0);
+
+    if (server.paired) {
+        fprintf(stderr, "already paired for key directory: %s\n", opt->key_dir);
+        return 0;
+    }
+
+    char pin_buf[5];
+    const char* pin = opt->pin;
+    if (!pin) {
+        generate_pair_pin(pin_buf);
+        pin = pin_buf;
+    }
+
+    fprintf(stderr, "Pair with host %s using PIN: %s\n", opt->host, pin);
+    fprintf(stderr, "Enter this PIN in Sunshine / NVIDIA host UI now...\n");
+
+    if (gs_pair(&server, (char*)pin) != 0) {
+        fprintf(stderr, "gs_pair failed: %s\n", gs_error ? gs_error : "(null)");
+        return 3;
+    }
+
+    fprintf(stderr, "pair successful\n");
+    return 0;
+}
+
+static int run_list_command(const ListOptions* opt) {
+    SERVER_DATA server;
+    memset(&server, 0, sizeof(server));
+
+    if (gs_init(&server, (char*)opt->host, 0, opt->key_dir, 1, false) != 0) {
+        fprintf(stderr, "gs_init failed: %s\n", gs_error ? gs_error : "(null)");
+        return 2;
+    }
+
+    fprintf(stderr, "server appversion=%s paired=%d\n",
+            server.serverInfo.serverInfoAppVersion ? server.serverInfo.serverInfoAppVersion : "(null)",
+            server.paired ? 1 : 0);
+
+    if (!server.paired) {
+        fprintf(stderr, "host is not paired for this key directory: %s\n", opt->key_dir);
+        fprintf(stderr, "run: ml_worker pair %s --key-dir %s\n", opt->host, opt->key_dir);
+        return 3;
+    }
+
+    PAPP_LIST app_list = NULL;
+    if (gs_applist(&server, &app_list) != 0) {
+        fprintf(stderr, "gs_applist failed: %s\n", gs_error ? gs_error : "(null)");
+        return 4;
+    }
+
+    int index = 1;
+    for (PAPP_LIST p = app_list; p != NULL; p = p->next, index++) {
+        printf("%d. %s (app_id=%d)\n",
+               index,
+               p->name ? p->name : "(null)",
+               p->id);
+    }
+
+    return 0;
+}
+
+static int run_stream_command(const StreamOptions* opt) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
     fprintf(stderr,
             "options: host=%s app=%s shm=%s %dx%d@%d bitrate=%d cs=%u range=%u key_dir=%s control=%s:%d\n",
-            opt.host, opt.app, opt.shm_name,
-            opt.width, opt.height, opt.fps, opt.bitrate,
-            opt.shm_color_space, opt.shm_color_range, opt.key_dir,
-            opt.control_bind, opt.control_port);
-
+            opt->host, opt->app, opt->shm_name,
+            opt->width, opt->height, opt->fps, opt->bitrate,
+            opt->shm_color_space, opt->shm_color_range, opt->key_dir,
+            opt->control_bind, opt->control_port);
 
     SERVER_DATA server;
     memset(&server, 0, sizeof(server));
@@ -304,19 +486,19 @@ int main(int argc, char** argv) {
     STREAM_CONFIGURATION streamConfig;
     LiInitializeStreamConfiguration(&streamConfig);
 
-    streamConfig.width = opt.width;
-    streamConfig.height = opt.height;
-    streamConfig.fps = opt.fps;
-    streamConfig.bitrate = opt.bitrate;
-    streamConfig.packetSize = opt.packet_size;
+    streamConfig.width = opt->width;
+    streamConfig.height = opt->height;
+    streamConfig.fps = opt->fps;
+    streamConfig.bitrate = opt->bitrate;
+    streamConfig.packetSize = opt->packet_size;
     streamConfig.streamingRemotely = STREAM_CFG_AUTO;
     streamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
     streamConfig.supportedVideoFormats = VIDEO_FORMAT_H264;
     streamConfig.clientRefreshRateX100 = 6000;
-    streamConfig.colorSpace = opt.ll_color_space;
-    streamConfig.colorRange = opt.ll_color_range;
+    streamConfig.colorSpace = opt->ll_color_space;
+    streamConfig.colorRange = opt->ll_color_range;
 
-    if (gs_init(&server, (char*)opt.host, 0, opt.key_dir, 1, false) != 0) {
+    if (gs_init(&server, (char*)opt->host, 0, opt->key_dir, 1, false) != 0) {
         fprintf(stderr, "gs_init failed: %s\n", gs_error ? gs_error : "(null)");
         return 2;
     }
@@ -334,9 +516,9 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    int app_id = resolve_app_id(&server, opt.app);
+    int app_id = resolve_app_id(&server, opt->app);
     if (app_id < 0) {
-        fprintf(stderr, "could not resolve app: %s\n", opt.app);
+        fprintf(stderr, "could not resolve app: %s\n", opt->app);
         return 4;
     }
 
@@ -355,11 +537,11 @@ int main(int argc, char** argv) {
 
     WorkerRenderConfig render_cfg;
     memset(&render_cfg, 0, sizeof(render_cfg));
-    snprintf(render_cfg.shm_name, sizeof(render_cfg.shm_name), "%s", opt.shm_name);
+    snprintf(render_cfg.shm_name, sizeof(render_cfg.shm_name), "%s", opt->shm_name);
     render_cfg.slot_count = 2;
-    render_cfg.color_space = opt.shm_color_space;
-    render_cfg.color_range = opt.shm_color_range;
-    render_cfg.fps = (uint32_t)opt.fps;
+    render_cfg.color_space = opt->shm_color_space;
+    render_cfg.color_range = opt->shm_color_range;
+    render_cfg.fps = (uint32_t)opt->fps;
     render_cfg.fatal_code = &fatal_code;
 
     connection_callbacks_set_fatal_code(&fatal_code);
@@ -378,13 +560,14 @@ int main(int argc, char** argv) {
         connection_callbacks_set_fatal_code(NULL);
         return 6;
     }
+
     ControlSocket control_socket;
     memset(&control_socket, 0, sizeof(control_socket));
     control_socket.fd = -1;
 
     int control_enabled = 0;
-    if (opt.control_port > 0) {
-        if (control_socket_open(&control_socket, opt.control_bind, (uint16_t)opt.control_port) != 0) {
+    if (opt->control_port > 0) {
+        if (control_socket_open(&control_socket, opt->control_bind, (uint16_t)opt->control_port) != 0) {
             fprintf(stderr, "control socket open failed\n");
             connection_callbacks_set_fatal_code(NULL);
             LiStopConnection();
@@ -399,7 +582,7 @@ int main(int argc, char** argv) {
 
     while (g_running) {
         if (control_enabled) {
-            control_socket_process_all(&control_socket, opt.width, opt.height);
+            control_socket_process_all(&control_socket, opt->width, opt->height);
         }
 
         if (fatal_code != WORKER_FATAL_NONE) {
@@ -407,16 +590,60 @@ int main(int argc, char** argv) {
             exit_code = 100 + fatal_code;
             break;
         }
+
         usleep(control_enabled ? 2000 : 10000);
     }
 
-
-    connection_callbacks_set_fatal_code(NULL);
     if (control_enabled) {
         control_socket_close(&control_socket);
     }
 
+    connection_callbacks_set_fatal_code(NULL);
     LiStopConnection();
 
     return exit_code;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    if (!strcmp(argv[1], "pair")) {
+        PairOptions opt;
+        if (parse_pair_args(argc - 1, argv + 1, &opt) != 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        return run_pair_command(&opt);
+    }
+
+    if (!strcmp(argv[1], "list")) {
+        ListOptions opt;
+        if (parse_list_args(argc - 1, argv + 1, &opt) != 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        return run_list_command(&opt);
+    }
+
+    if (!strcmp(argv[1], "stream")) {
+        StreamOptions opt;
+        if (parse_stream_args(argc - 1, argv + 1, &opt) != 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        return run_stream_command(&opt);
+    }
+
+    /* 兼容旧用法：ml_worker <host> <app> */
+    {
+        StreamOptions opt;
+        if (parse_stream_args(argc, argv, &opt) != 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        return run_stream_command(&opt);
+    }
 }
