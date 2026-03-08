@@ -11,6 +11,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define ML_CTRL_MAX_PACKET 2048
+
 static int clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
@@ -23,7 +25,11 @@ static short clamp_short_signed(int v) {
     return (short)v;
 }
 
-static int dispatch_cmd(const MlControlCmd* cmd, int reference_width, int reference_height) {
+static int dispatch_cmd(const MlControlCmd* cmd,
+                        const unsigned char* payload,
+                        size_t payload_len,
+                        int reference_width,
+                        int reference_height) {
     if (!cmd) {
         return -1;
     }
@@ -56,20 +62,49 @@ static int dispatch_cmd(const MlControlCmd* cmd, int reference_width, int refere
             );
 
         case ML_CTRL_CMD_MOUSE_BUTTON:
+            /* a=action, b=button */
             return LiSendMouseButtonEvent((char)cmd->a, cmd->b);
 
         case ML_CTRL_CMD_MOUSE_CLICK: {
+            /* a=button */
             int rc = LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, cmd->a);
             if (rc != 0) {
                 return rc;
             }
             return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, cmd->a);
         }
+
         case ML_CTRL_CMD_MOUSE_SCROLL:
+            /* a=clicks */
             return LiSendScrollEvent((signed char)cmd->a);
 
         case ML_CTRL_CMD_MOUSE_HSCROLL:
+            /* a=clicks */
             return LiSendHScrollEvent((signed char)cmd->a);
+
+        case ML_CTRL_CMD_KEYBOARD:
+            /* a=keyCode, b=keyAction, c=modifiers */
+            return LiSendKeyboardEvent((short)cmd->a, (char)cmd->b, (char)cmd->c);
+
+        case ML_CTRL_CMD_KEY_PRESS: {
+            /* a=keyCode, b=modifiers */
+            int rc = LiSendKeyboardEvent((short)cmd->a, KEY_ACTION_DOWN, (char)cmd->b);
+            if (rc != 0) {
+                return rc;
+            }
+            return LiSendKeyboardEvent((short)cmd->a, KEY_ACTION_UP, (char)cmd->b);
+        }
+
+        case ML_CTRL_CMD_TEXT:
+            if ((int32_t)payload_len != cmd->a) {
+                fprintf(stderr, "[ctrl] text payload length mismatch: hdr=%d pkt=%zu\n",
+                        cmd->a, payload_len);
+                return -1;
+            }
+            if (payload_len == 0) {
+                return 0;
+            }
+            return LiSendUtf8TextEvent((const char*)payload, (unsigned int)payload_len);
 
         default:
             fprintf(stderr, "[ctrl] unknown cmd type=%u\n", cmd->type);
@@ -152,8 +187,8 @@ int control_socket_process_all(ControlSocket* s, int reference_width, int refere
     int processed = 0;
 
     for (;;) {
-        MlControlCmd cmd;
-        ssize_t n = recvfrom(s->fd, &cmd, sizeof(cmd), 0, NULL, NULL);
+        unsigned char packet[ML_CTRL_MAX_PACKET];
+        ssize_t n = recvfrom(s->fd, packet, sizeof(packet), 0, NULL, NULL);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
@@ -163,10 +198,13 @@ int control_socket_process_all(ControlSocket* s, int reference_width, int refere
             break;
         }
 
-        if ((size_t)n != sizeof(cmd)) {
-            fprintf(stderr, "[ctrl] ignoring packet with bad size: %zd\n", n);
+        if ((size_t)n < sizeof(MlControlCmd)) {
+            fprintf(stderr, "[ctrl] ignoring short packet: %zd\n", n);
             continue;
         }
+
+        MlControlCmd cmd;
+        memcpy(&cmd, packet, sizeof(cmd));
 
         if (cmd.magic != ML_CTRL_MAGIC) {
             fprintf(stderr, "[ctrl] ignoring packet with bad magic: 0x%x\n", cmd.magic);
@@ -178,7 +216,10 @@ int control_socket_process_all(ControlSocket* s, int reference_width, int refere
             continue;
         }
 
-        int rc = dispatch_cmd(&cmd, reference_width, reference_height);
+        const unsigned char* payload = packet + sizeof(MlControlCmd);
+        size_t payload_len = (size_t)n - sizeof(MlControlCmd);
+
+        int rc = dispatch_cmd(&cmd, payload, payload_len, reference_width, reference_height);
         if (rc != 0) {
             fprintf(stderr, "[ctrl] command seq=%llu type=%u failed: %d\n",
                     (unsigned long long)cmd.seq, cmd.type, rc);
