@@ -119,5 +119,4 @@ CMakeFiles/ml_worker.dir/src/decoder_ffmpeg.c.o: \
  /usr/include/x86_64-linux-gnu/libavcodec/codec_desc.h \
  /usr/include/x86_64-linux-gnu/libavcodec/codec_par.h \
  /home/gejun/work/moonlight-common-c/src/Limelight.h \
- /usr/include/x86_64-linux-gnu/libavutil/error.h \
- /usr/include/x86_64-linux-gnu/libavutil/pixdesc.h
+ /usr/include/x86_64-linux-gnu/libavutil/error.h

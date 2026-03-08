@@ -11,6 +11,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/gejun/work/my_ml_work/src/connection_callbacks.c" "CMakeFiles/ml_worker.dir/src/connection_callbacks.c.o" "gcc" "CMakeFiles/ml_worker.dir/src/connection_callbacks.c.o.d"
   "/home/gejun/work/my_ml_work/src/decoder_ffmpeg.c" "CMakeFiles/ml_worker.dir/src/decoder_ffmpeg.c.o" "gcc" "CMakeFiles/ml_worker.dir/src/decoder_ffmpeg.c.o.d"
   "/home/gejun/work/my_ml_work/src/main.c" "CMakeFiles/ml_worker.dir/src/main.c.o" "gcc" "CMakeFiles/ml_worker.dir/src/main.c.o.d"
+  "/home/gejun/work/my_ml_work/src/shm_writer.c" "CMakeFiles/ml_worker.dir/src/shm_writer.c.o" "gcc" "CMakeFiles/ml_worker.dir/src/shm_writer.c.o.d"
   "/home/gejun/work/my_ml_work/src/video_callbacks.c" "CMakeFiles/ml_worker.dir/src/video_callbacks.c.o" "gcc" "CMakeFiles/ml_worker.dir/src/video_callbacks.c.o.d"
   )
 

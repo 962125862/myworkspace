@@ -17,7 +17,9 @@ add_executable(ml_worker
         src/decoder_ffmpeg.c
         src/video_callbacks.c
         src/connection_callbacks.c
+        src/shm_writer.c
 )
+
 
 target_include_directories(ml_worker PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

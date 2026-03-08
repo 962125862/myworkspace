@@ -87,4 +87,43 @@ CMakeFiles/ml_worker.dir/src/main.c.o: \
  /home/gejun/work/my_ml_work/third_party/moonlight-embedded/libgamestream/client.h \
  /home/gejun/work/my_ml_work/third_party/moonlight-embedded/libgamestream/xml.h \
  /home/gejun/work/my_ml_work/include/connection_callbacks.h \
- /home/gejun/work/my_ml_work/include/video_callbacks.h
+ /home/gejun/work/my_ml_work/include/video_callbacks.h \
+ /home/gejun/work/my_ml_work/include/shm_writer.h \
+ /usr/include/x86_64-linux-gnu/libavutil/frame.h \
+ /usr/include/x86_64-linux-gnu/libavutil/avutil.h \
+ /usr/include/x86_64-linux-gnu/libavutil/common.h /usr/include/errno.h \
+ /usr/include/x86_64-linux-gnu/bits/errno.h /usr/include/linux/errno.h \
+ /usr/include/x86_64-linux-gnu/asm/errno.h \
+ /usr/include/asm-generic/errno.h /usr/include/asm-generic/errno-base.h \
+ /usr/include/inttypes.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/limits.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/syslimits.h \
+ /usr/include/limits.h /usr/include/x86_64-linux-gnu/bits/posix1_lim.h \
+ /usr/include/x86_64-linux-gnu/bits/local_lim.h \
+ /usr/include/linux/limits.h \
+ /usr/include/x86_64-linux-gnu/bits/pthread_stack_min-dynamic.h \
+ /usr/include/x86_64-linux-gnu/bits/pthread_stack_min.h \
+ /usr/include/x86_64-linux-gnu/bits/posix2_lim.h /usr/include/math.h \
+ /usr/include/x86_64-linux-gnu/bits/math-vector.h \
+ /usr/include/x86_64-linux-gnu/bits/libm-simd-decl-stubs.h \
+ /usr/include/x86_64-linux-gnu/bits/flt-eval-method.h \
+ /usr/include/x86_64-linux-gnu/bits/fp-logb.h \
+ /usr/include/x86_64-linux-gnu/bits/fp-fast.h \
+ /usr/include/x86_64-linux-gnu/bits/mathcalls-helper-functions.h \
+ /usr/include/x86_64-linux-gnu/bits/mathcalls.h \
+ /usr/include/x86_64-linux-gnu/libavutil/attributes.h \
+ /usr/include/x86_64-linux-gnu/libavutil/error.h \
+ /usr/include/x86_64-linux-gnu/libavutil/macros.h \
+ /usr/include/x86_64-linux-gnu/libavutil/avconfig.h \
+ /usr/include/x86_64-linux-gnu/libavutil/mem.h \
+ /usr/include/x86_64-linux-gnu/libavutil/rational.h \
+ /usr/include/x86_64-linux-gnu/libavutil/version.h \
+ /usr/include/x86_64-linux-gnu/libavutil/mathematics.h \
+ /usr/include/x86_64-linux-gnu/libavutil/intfloat.h \
+ /usr/include/x86_64-linux-gnu/libavutil/log.h \
+ /usr/include/x86_64-linux-gnu/libavutil/pixfmt.h \
+ /usr/include/x86_64-linux-gnu/libavutil/buffer.h \
+ /usr/include/x86_64-linux-gnu/libavutil/channel_layout.h \
+ /usr/include/x86_64-linux-gnu/libavutil/dict.h \
+ /usr/include/x86_64-linux-gnu/libavutil/samplefmt.h \
+ /home/gejun/work/my_ml_work/include/worker_defs.h

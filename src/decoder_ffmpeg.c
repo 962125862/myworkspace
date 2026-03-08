@@ -3,7 +3,6 @@
 #include <Limelight.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
-#include <libavutil/pixdesc.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,17 +121,7 @@ AVFrame* ffmpeg_get_frame(bool native_frame) {
     if (err == 0) {
         current_frame = next_frame;
         next_frame = (current_frame + 1) % dec_frames_cnt;
-
-        AVFrame *frame = dec_frames[current_frame];
-        const char *fmt = av_get_pix_fmt_name(frame->format);
-
-        fprintf(stderr, "frame: %dx%d fmt=%s pts=%lld\n",
-                frame->width,
-                frame->height,
-                fmt ? fmt : "unknown",
-                (long long)frame->pts);
-
-        return frame;
+        return dec_frames[current_frame];
     }
     else if (err != AVERROR(EAGAIN)) {
         char errorstring[256];
@@ -142,6 +131,7 @@ AVFrame* ffmpeg_get_frame(bool native_frame) {
 
     return NULL;
 }
+
 
 int ffmpeg_decode(unsigned char* indata, int inlen) {
     pkt->data = indata;

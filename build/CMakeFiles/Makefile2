@@ -137,12 +137,12 @@ CMakeFiles/ml_worker.dir/all: third_party/libgamestream-build/CMakeFiles/moonlig
 CMakeFiles/ml_worker.dir/all: third_party/libgamestream-build/CMakeFiles/gamestream.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ml_worker.dir/build.make CMakeFiles/ml_worker.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ml_worker.dir/build.make CMakeFiles/ml_worker.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gejun/work/my_ml_work/build/CMakeFiles --progress-num=21,22,23,24,25 "Built target ml_worker"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gejun/work/my_ml_work/build/CMakeFiles --progress-num=21,22,23,24,25,26 "Built target ml_worker"
 .PHONY : CMakeFiles/ml_worker.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/ml_worker.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/gejun/work/my_ml_work/build/CMakeFiles 80
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/gejun/work/my_ml_work/build/CMakeFiles 81
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/ml_worker.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/gejun/work/my_ml_work/build/CMakeFiles 0
 .PHONY : CMakeFiles/ml_worker.dir/rule
@@ -163,7 +163,7 @@ CMakeFiles/ml_worker.dir/clean:
 third_party/moonlight-common-c-build/CMakeFiles/moonlight-common-c.dir/all: third_party/moonlight-common-c-build/enet/CMakeFiles/enet.dir/all
 	$(MAKE) $(MAKESILENT) -f third_party/moonlight-common-c-build/CMakeFiles/moonlight-common-c.dir/build.make third_party/moonlight-common-c-build/CMakeFiles/moonlight-common-c.dir/depend
 	$(MAKE) $(MAKESILENT) -f third_party/moonlight-common-c-build/CMakeFiles/moonlight-common-c.dir/build.make third_party/moonlight-common-c-build/CMakeFiles/moonlight-common-c.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gejun/work/my_ml_work/build/CMakeFiles --progress-num=58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80 "Built target moonlight-common-c"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gejun/work/my_ml_work/build/CMakeFiles --progress-num=59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81 "Built target moonlight-common-c"
 .PHONY : third_party/moonlight-common-c-build/CMakeFiles/moonlight-common-c.dir/all
 
 # Build rule for subdir invocation for target.
@@ -215,7 +215,7 @@ third_party/moonlight-common-c-build/enet/CMakeFiles/enet.dir/clean:
 third_party/libgamestream-build/CMakeFiles/moonlight-common.dir/all:
 	$(MAKE) $(MAKESILENT) -f third_party/libgamestream-build/CMakeFiles/moonlight-common.dir/build.make third_party/libgamestream-build/CMakeFiles/moonlight-common.dir/depend
 	$(MAKE) $(MAKESILENT) -f third_party/libgamestream-build/CMakeFiles/moonlight-common.dir/build.make third_party/libgamestream-build/CMakeFiles/moonlight-common.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gejun/work/my_ml_work/build/CMakeFiles --progress-num=26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57 "Built target moonlight-common"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gejun/work/my_ml_work/build/CMakeFiles --progress-num=27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58 "Built target moonlight-common"
 .PHONY : third_party/libgamestream-build/CMakeFiles/moonlight-common.dir/all
 
 # Build rule for subdir invocation for target.

@@ -298,6 +298,30 @@ src/main.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ml_worker.dir/build.make CMakeFiles/ml_worker.dir/src/main.c.s
 .PHONY : src/main.c.s
 
+src/shm_writer.o: src/shm_writer.c.o
+.PHONY : src/shm_writer.o
+
+# target to build an object file
+src/shm_writer.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ml_worker.dir/build.make CMakeFiles/ml_worker.dir/src/shm_writer.c.o
+.PHONY : src/shm_writer.c.o
+
+src/shm_writer.i: src/shm_writer.c.i
+.PHONY : src/shm_writer.i
+
+# target to preprocess a source file
+src/shm_writer.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ml_worker.dir/build.make CMakeFiles/ml_worker.dir/src/shm_writer.c.i
+.PHONY : src/shm_writer.c.i
+
+src/shm_writer.s: src/shm_writer.c.s
+.PHONY : src/shm_writer.s
+
+# target to generate assembly for a file
+src/shm_writer.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ml_worker.dir/build.make CMakeFiles/ml_worker.dir/src/shm_writer.c.s
+.PHONY : src/shm_writer.c.s
+
 src/video_callbacks.o: src/video_callbacks.c.o
 .PHONY : src/video_callbacks.o
 
@@ -348,6 +372,9 @@ help:
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"
+	@echo "... src/shm_writer.o"
+	@echo "... src/shm_writer.i"
+	@echo "... src/shm_writer.s"
 	@echo "... src/video_callbacks.o"
 	@echo "... src/video_callbacks.i"
 	@echo "... src/video_callbacks.s"

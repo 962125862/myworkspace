@@ -1,7 +1,7 @@
-CMakeFiles/ml_worker.dir/src/video_callbacks.c.o: \
- /home/gejun/work/my_ml_work/src/video_callbacks.c \
- /usr/include/stdc-predef.h \
- /home/gejun/work/my_ml_work/include/video_callbacks.h \
+CMakeFiles/ml_worker.dir/src/shm_writer.c.o: \
+ /home/gejun/work/my_ml_work/src/shm_writer.c /usr/include/stdc-predef.h \
+ /home/gejun/work/my_ml_work/include/shm_writer.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h \
  /usr/lib/gcc/x86_64-linux-gnu/13/include/stdint.h /usr/include/stdint.h \
  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h \
  /usr/include/features.h /usr/include/features-time64.h \
@@ -18,10 +18,6 @@ CMakeFiles/ml_worker.dir/src/video_callbacks.c.o: \
  /usr/include/x86_64-linux-gnu/bits/stdint-intn.h \
  /usr/include/x86_64-linux-gnu/bits/stdint-uintn.h \
  /usr/include/x86_64-linux-gnu/bits/stdint-least.h \
- /home/gejun/work/moonlight-common-c/src/Limelight.h \
- /usr/lib/gcc/x86_64-linux-gnu/13/include/stdbool.h \
- /home/gejun/work/my_ml_work/include/shm_writer.h \
- /usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h \
  /usr/include/x86_64-linux-gnu/libavutil/frame.h \
  /usr/include/x86_64-linux-gnu/libavutil/avutil.h \
  /usr/include/x86_64-linux-gnu/libavutil/common.h /usr/include/errno.h \
@@ -96,32 +92,25 @@ CMakeFiles/ml_worker.dir/src/video_callbacks.c.o: \
  /usr/include/x86_64-linux-gnu/libavutil/buffer.h \
  /usr/include/x86_64-linux-gnu/libavutil/channel_layout.h \
  /usr/include/x86_64-linux-gnu/libavutil/dict.h \
- /usr/include/x86_64-linux-gnu/libavutil/samplefmt.h \
- /home/gejun/work/my_ml_work/include/decoder_ffmpeg.h \
- /usr/include/x86_64-linux-gnu/libavcodec/avcodec.h \
- /usr/include/x86_64-linux-gnu/libavutil/samplefmt.h \
- /usr/include/x86_64-linux-gnu/libavutil/attributes.h \
- /usr/include/x86_64-linux-gnu/libavutil/avutil.h \
- /usr/include/x86_64-linux-gnu/libavutil/buffer.h \
- /usr/include/x86_64-linux-gnu/libavutil/channel_layout.h \
- /usr/include/x86_64-linux-gnu/libavutil/dict.h \
- /usr/include/x86_64-linux-gnu/libavutil/log.h \
- /usr/include/x86_64-linux-gnu/libavutil/pixfmt.h \
- /usr/include/x86_64-linux-gnu/libavutil/rational.h \
- /usr/include/x86_64-linux-gnu/libavcodec/codec.h \
- /usr/include/x86_64-linux-gnu/libavutil/hwcontext.h \
- /usr/include/x86_64-linux-gnu/libavutil/frame.h \
- /usr/include/x86_64-linux-gnu/libavcodec/codec_id.h \
- /usr/include/x86_64-linux-gnu/libavcodec/version_major.h \
- /usr/include/x86_64-linux-gnu/libavcodec/version_major.h \
- /usr/include/x86_64-linux-gnu/libavcodec/codec_id.h \
- /usr/include/x86_64-linux-gnu/libavcodec/defs.h \
- /usr/include/x86_64-linux-gnu/libavcodec/packet.h \
- /usr/include/x86_64-linux-gnu/libavutil/version.h \
- /usr/include/x86_64-linux-gnu/libavcodec/version.h \
- /usr/include/x86_64-linux-gnu/libavcodec/codec_desc.h \
- /usr/include/x86_64-linux-gnu/libavcodec/codec_par.h \
- /home/gejun/work/my_ml_work/include/worker_defs.h /usr/include/time.h \
+ /usr/include/x86_64-linux-gnu/libavutil/samplefmt.h /usr/include/fcntl.h \
+ /usr/include/x86_64-linux-gnu/bits/fcntl.h \
+ /usr/include/x86_64-linux-gnu/bits/fcntl-linux.h \
+ /usr/include/x86_64-linux-gnu/bits/stat.h \
+ /usr/include/x86_64-linux-gnu/bits/struct_stat.h \
+ /usr/include/x86_64-linux-gnu/sys/mman.h \
+ /usr/include/x86_64-linux-gnu/bits/mman.h \
+ /usr/include/x86_64-linux-gnu/bits/mman-map-flags-generic.h \
+ /usr/include/x86_64-linux-gnu/bits/mman-linux.h \
+ /usr/include/x86_64-linux-gnu/bits/mman-shared.h \
+ /usr/include/x86_64-linux-gnu/bits/mman_ext.h \
+ /usr/include/x86_64-linux-gnu/sys/stat.h /usr/include/time.h \
  /usr/include/x86_64-linux-gnu/bits/time.h \
  /usr/include/x86_64-linux-gnu/bits/types/struct_tm.h \
- /usr/include/x86_64-linux-gnu/bits/types/struct_itimerspec.h
+ /usr/include/x86_64-linux-gnu/bits/types/struct_itimerspec.h \
+ /usr/include/unistd.h /usr/include/x86_64-linux-gnu/bits/posix_opt.h \
+ /usr/include/x86_64-linux-gnu/bits/environments.h \
+ /usr/include/x86_64-linux-gnu/bits/confname.h \
+ /usr/include/x86_64-linux-gnu/bits/getopt_posix.h \
+ /usr/include/x86_64-linux-gnu/bits/getopt_core.h \
+ /usr/include/x86_64-linux-gnu/bits/unistd_ext.h \
+ /usr/include/x86_64-linux-gnu/libavutil/pixfmt.h
