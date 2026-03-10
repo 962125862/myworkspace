@@ -1,2 +1,44 @@
+# Build artifacts
 build/
+cmake-build-*/
+out/
+dist/
+*.o
+*.a
+*.so
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Large test data files
+*.h264
+*.mp4
+*.avi
+*.mkv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and temp files
+*.log
+/tmp/
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local config
+.env
+.env.local
+
+# Third party deps
 third_party/
