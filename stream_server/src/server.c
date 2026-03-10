@@ -287,14 +287,28 @@ static void* client_handler(void* arg) {
     }
     
     printf("[Server] Client %s disconnected\n", client_ip);
-    
-    /* 标记为待删除 */
-    client->should_remove = 1;
-    client->active = 0;
-    
+
+    /* 从链表中移除并释放 client 资源
+     * 注意：必须先关闭 fd（让 recv 返回错误），再从链表摘除并 free
+     * server_stop() 关闭 fd 后会触发此处 recv 失败退出循环，
+     * 然后此处负责从链表和内存中清理，避免 server_stop() 与 handler 并发 free
+     */
     pthread_mutex_lock(&server->clients_lock);
+
+    /* 从单链表中找到并摘除当前 client */
+    ClientConn** pp = &server->clients;
+    while (*pp && *pp != client) {
+        pp = &(*pp)->next;
+    }
+    if (*pp == client) {
+        *pp = client->next;
+    }
     server->client_count--;
+
     pthread_mutex_unlock(&server->clients_lock);
+
+    /* 关闭 fd（如果还没被 server_stop 关闭）并释放内存 */
+    client_destroy(client);
     
     return NULL;
 }
@@ -467,28 +481,29 @@ void server_stop(TcpServer* server) {
     /* 等待接受线程结束 */
     pthread_join(server->accept_thread, NULL);
     
-    /* 关闭所有客户端连接 */
+    /* 关闭所有客户端 fd，触发 handler 线程的 recv 返回错误并自行退出+清理 */
     pthread_mutex_lock(&server->clients_lock);
     ClientConn* client = server->clients;
     while (client) {
-        ClientConn* next = client->next;
         if (client->fd >= 0) {
             close(client->fd);
             client->fd = -1;
         }
-        client = next;
+        client = client->next;
     }
     pthread_mutex_unlock(&server->clients_lock);
-    
-    /* 等待客户端线程退出 */
+
+    /* 等待所有 handler 线程退出并完成链表清理 */
     usleep(500000);  /* 500ms */
-    
-    /* 清理客户端资源 */
+
+    /* 清理任何仍残留的条目 (正常路径下链表应已为空) */
     pthread_mutex_lock(&server->clients_lock);
     client = server->clients;
     while (client) {
         ClientConn* next = client->next;
-        client_destroy(client);
+        if (client->fd >= 0) close(client->fd);
+        free(client->recv_buf);
+        free(client);
         client = next;
     }
     server->clients = NULL;

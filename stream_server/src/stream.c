@@ -31,6 +31,24 @@ int stream_manager_init(StreamManager* mgr) {
     return 0;
 }
 
+void stream_manager_destroy(StreamManager* mgr) {
+    if (!mgr) return;
+
+    /* 停止压力测试（如果正在运行）并释放其资源 */
+    if (mgr->stress_test.enabled) {
+        stream_manager_stop_stress_test(mgr);
+    }
+
+    /* 关闭所有流的解码器 */
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        StreamContext* stream = &mgr->streams[i];
+        stream_close_decoder(stream);
+        pthread_mutex_destroy(&stream->lock);
+    }
+
+    pthread_mutex_destroy(&mgr->lock);
+}
+
 StreamContext* stream_manager_get(StreamManager* mgr, uint16_t stream_id) {
     if (!mgr || stream_id < 1 || stream_id > MAX_STREAMS) {
         return NULL;
@@ -392,9 +410,11 @@ int stream_manager_start_stress_test(StreamManager* mgr, uint16_t source_stream_
     /* 初始化虚拟流 */
     int initialized = 0;
     for (int i = 0; i < num_copies; i++) {
-        /* 从1开始查找可用的流ID（跳过源流） */
-        int stream_id = (i + 1 == source_stream_id) ? i + 2 : i + 1;
-        if (stream_id == source_stream_id) stream_id++;
+        /* 从 1 开始分配流 ID，跳过源流 ID
+         * 例如 source_stream_id=2: i=0->1, i=1->3, i=2->4 ...
+         */
+        int stream_id = i + 1;
+        if (stream_id >= source_stream_id) stream_id++;
         
         if (stream_id > MAX_STREAMS) {
             fprintf(stderr, "[StressTest] Not enough stream slots available\n");

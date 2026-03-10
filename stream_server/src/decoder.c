@@ -635,16 +635,64 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
         return -1;
     }
     
-    /* 分配输出帧（简化处理，实际需要复制数据） */
+    /* 分配输出帧，完整复制数据（与 decoder_decode 保持一致） */
     DecodedFrame* frame = calloc(1, sizeof(*frame));
     if (!frame) return -1;
-    
+
     frame->width = ctx->frame->width;
     frame->height = ctx->frame->height;
     frame->pts = ctx->frame->pts;
     frame->key_frame = !!(ctx->frame->flags & AV_FRAME_FLAG_KEY);
-    frame->format = DECODE_FMT_NV12;
-    
+    frame->_decoder_ctx = ctx;
+
+    /* 硬件帧需要先下载到 CPU */
+    AVFrame* sw_frame = ctx->frame;
+    AVFrame* tmp_frame = NULL;
+    if (ctx->config.backend == DECODE_BACKEND_NVIDIA ||
+        ctx->config.backend == DECODE_BACKEND_INTEL_VA) {
+        if (ctx->frame->format == ctx->hw_pix_fmt) {
+            tmp_frame = av_frame_alloc();
+            if (!tmp_frame) { free(frame); return -1; }
+            if (av_hwframe_transfer_data(tmp_frame, ctx->frame, 0) < 0) {
+                av_frame_free(&tmp_frame);
+                free(frame);
+                return -1;
+            }
+            av_frame_copy_props(tmp_frame, ctx->frame);
+            sw_frame = tmp_frame;
+        }
+    }
+
+    if (sw_frame->format == AV_PIX_FMT_NV12) {
+        frame->format = DECODE_FMT_NV12;
+    } else if (sw_frame->format == AV_PIX_FMT_YUV420P) {
+        frame->format = DECODE_FMT_YUV420P;
+    } else {
+        frame->format = DECODE_FMT_NONE;
+    }
+
+    if (tmp_frame) {
+        /* 零拷贝：frame 持有 AVFrame 所有权 */
+        frame->av_frame = tmp_frame;
+        for (int i = 0; i < 4; i++) {
+            frame->data[i] = tmp_frame->data[i];
+            frame->linesize[i] = tmp_frame->linesize[i];
+        }
+    } else {
+        /* CPU 帧：深拷贝数据 */
+        for (int i = 0; i < 4; i++) {
+            if (sw_frame->data[i]) {
+                int lines = (i < 2) ? frame->height : frame->height / 2;
+                frame->linesize[i] = sw_frame->linesize[i];
+                frame->data[i] = malloc(frame->linesize[i] * lines);
+                if (frame->data[i]) {
+                    memcpy(frame->data[i], sw_frame->data[i],
+                           (size_t)frame->linesize[i] * lines);
+                }
+            }
+        }
+    }
+
     *out_frame = frame;
     return 0;
 }

@@ -167,5 +167,9 @@ int main(int argc, char* argv[]) {
     }
     
     printf("[Main] Server stopped\n");
+
+    /* 销毁流管理器，释放所有 mutex 和解码器资源 */
+    stream_manager_destroy(&stream_mgr);
+
     return 0;
 }

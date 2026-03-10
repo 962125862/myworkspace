@@ -142,6 +142,9 @@ typedef struct {
 /** 初始化流管理器 (初始化所有流槽位和锁) */
 int stream_manager_init(StreamManager* mgr);
 
+/** 销毁流管理器 (关闭所有解码器，销毁所有 mutex，释放资源) */
+void stream_manager_destroy(StreamManager* mgr);
+
 /** 根据 stream_id 获取流上下文 (1-based, 返回 NULL 表示越界) */
 StreamContext* stream_manager_get(StreamManager* mgr, uint16_t stream_id);
 
