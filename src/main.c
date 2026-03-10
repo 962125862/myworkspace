@@ -6,7 +6,6 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <time.h>
-
 #include <Limelight.h>
 #include "client.h"
 
@@ -23,7 +22,6 @@ typedef struct {
     const char* host;
     const char* app;
     const char* key_dir;
-    char shm_name[ML_SHM_NAME_MAX];
 
     int width;
     int height;
@@ -33,8 +31,11 @@ typedef struct {
 
     int ll_color_space;
     int ll_color_range;
-    uint32_t shm_color_space;
-    uint32_t shm_color_range;
+
+    /* TCP输出配置 */
+    char tcp_host[256];
+    uint16_t tcp_port;
+    uint16_t stream_id;
 
     const char* control_bind;
     int control_port;
@@ -146,15 +147,14 @@ static int default_limelight_color_range(void) {
 #endif
 }
 
-static int parse_color_space_arg(const char* s, int* out_ll, uint32_t* out_shm) {
-    if (!s || !out_ll || !out_shm) {
+static int parse_color_space_arg(const char* s, int* out_ll) {
+    if (!s || !out_ll) {
         return -1;
     }
 
     if (!strcasecmp(s, "709") || !strcasecmp(s, "bt709") || !strcasecmp(s, "rec709")) {
 #ifdef COLORSPACE_REC_709
         *out_ll = COLORSPACE_REC_709;
-        *out_shm = ML_COLOR_SPACE_BT709;
         return 0;
 #else
         return -1;
@@ -164,7 +164,6 @@ static int parse_color_space_arg(const char* s, int* out_ll, uint32_t* out_shm) 
     if (!strcasecmp(s, "601") || !strcasecmp(s, "bt601") || !strcasecmp(s, "rec601")) {
 #ifdef COLORSPACE_REC_601
         *out_ll = COLORSPACE_REC_601;
-        *out_shm = ML_COLOR_SPACE_BT601;
         return 0;
 #else
         return -1;
@@ -174,15 +173,14 @@ static int parse_color_space_arg(const char* s, int* out_ll, uint32_t* out_shm) 
     return -1;
 }
 
-static int parse_color_range_arg(const char* s, int* out_ll, uint32_t* out_shm) {
-    if (!s || !out_ll || !out_shm) {
+static int parse_color_range_arg(const char* s, int* out_ll) {
+    if (!s || !out_ll) {
         return -1;
     }
 
     if (!strcasecmp(s, "limited")) {
 #ifdef COLOR_RANGE_LIMITED
         *out_ll = COLOR_RANGE_LIMITED;
-        *out_shm = ML_COLOR_RANGE_LIMITED;
         return 0;
 #else
         return -1;
@@ -192,7 +190,6 @@ static int parse_color_range_arg(const char* s, int* out_ll, uint32_t* out_shm) 
     if (!strcasecmp(s, "full")) {
 #ifdef COLOR_RANGE_FULL
         *out_ll = COLOR_RANGE_FULL;
-        *out_shm = ML_COLOR_RANGE_FULL;
         return 0;
 #else
         return -1;
@@ -206,18 +203,20 @@ static void stream_options_defaults(StreamOptions* o) {
     memset(o, 0, sizeof(*o));
 
     o->key_dir = default_key_dir();
-    snprintf(o->shm_name, sizeof(o->shm_name), "/ml_stream_00");
+
+    /* 默认TCP输出配置 */
+    snprintf(o->tcp_host, sizeof(o->tcp_host), "127.0.0.1");
+    o->tcp_port = 9000;
+    o->stream_id = 1;
 
     o->width = 1280;
     o->height = 720;
     o->fps = 60;
     o->bitrate = 10000;
-    o->packet_size = 1024;
+    o->packet_size = 1392;  /* Moonlight 标准包大小，减少网络开销 */
 
     o->ll_color_space = default_limelight_color_space();
     o->ll_color_range = default_limelight_color_range();
-    o->shm_color_space = ML_COLOR_SPACE_BT709;
-    o->shm_color_range = ML_COLOR_RANGE_LIMITED;
 
     o->control_bind = "127.0.0.1";
     o->control_port = 0;
@@ -243,11 +242,13 @@ static void print_usage(const char* argv0) {
             "\n"
             "stream options:\n"
             "  --key-dir <path>\n"
-            "  --shm-name <name>         default: /ml_stream_00\n"
+            "  --tcp-host <ip>           default: 127.0.0.1\n"
+            "  --tcp-port <port>         default: 9000\n"
+            "  --stream-id <id>          default: 1 (1-65535)\n"
             "  --width <n>               default: 1280\n"
             "  --height <n>              default: 720\n"
             "  --fps <n>                 default: 60\n"
-            "  --bitrate <n>             default: 10000\n"
+            "  --bitrate <n>             default: 10000 (kbps)\n"
             "  --packet-size <n>         default: 1024\n"
             "  --colorspace <601|709>    default: 709\n"
             "  --range <limited|full>    default: limited\n"
@@ -258,7 +259,7 @@ static void print_usage(const char* argv0) {
             "  %s pair 192.168.11.50\n"
             "  %s list 192.168.11.50\n"
             "  %s 192.168.11.50 Desktop\n"
-            "  %s stream --host 192.168.11.50 --app Desktop --control-port 50001\n",
+            "  %s stream --host 192.168.11.50 --app Desktop --tcp-host 192.168.1.100 --tcp-port 9000 --stream-id 1\n",
             argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
@@ -335,8 +336,17 @@ static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
                 o->app = argv[++i];
             } else if (!strcmp(argv[i], "--key-dir") && i + 1 < argc) {
                 o->key_dir = argv[++i];
-            } else if (!strcmp(argv[i], "--shm-name") && i + 1 < argc) {
-                snprintf(o->shm_name, sizeof(o->shm_name), "%s", argv[++i]);
+            } else if (!strcmp(argv[i], "--tcp-host") && i + 1 < argc) {
+                snprintf(o->tcp_host, sizeof(o->tcp_host), "%s", argv[++i]);
+            } else if (!strcmp(argv[i], "--tcp-port") && i + 1 < argc) {
+                o->tcp_port = (uint16_t)atoi(argv[++i]);
+            } else if (!strcmp(argv[i], "--stream-id") && i + 1 < argc) {
+                int id = atoi(argv[++i]);
+                if (id < 1 || id > 65535) {
+                    fprintf(stderr, "invalid --stream-id (must be 1-65535)\n");
+                    return -1;
+                }
+                o->stream_id = (uint16_t)id;
             } else if (!strcmp(argv[i], "--width") && i + 1 < argc) {
                 o->width = atoi(argv[++i]);
             } else if (!strcmp(argv[i], "--height") && i + 1 < argc) {
@@ -348,12 +358,12 @@ static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
             } else if (!strcmp(argv[i], "--packet-size") && i + 1 < argc) {
                 o->packet_size = atoi(argv[++i]);
             } else if (!strcmp(argv[i], "--colorspace") && i + 1 < argc) {
-                if (parse_color_space_arg(argv[++i], &o->ll_color_space, &o->shm_color_space) != 0) {
+                if (parse_color_space_arg(argv[++i], &o->ll_color_space) != 0) {
                     fprintf(stderr, "invalid --colorspace\n");
                     return -1;
                 }
             } else if (!strcmp(argv[i], "--range") && i + 1 < argc) {
-                if (parse_color_range_arg(argv[++i], &o->ll_color_range, &o->shm_color_range) != 0) {
+                if (parse_color_range_arg(argv[++i], &o->ll_color_range) != 0) {
                     fprintf(stderr, "invalid --range\n");
                     return -1;
                 }
@@ -378,13 +388,8 @@ static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
         return -1;
     }
 
-    if ((o->width & 1) || (o->height & 1)) {
-        fprintf(stderr, "width/height must be even for I420\n");
-        return -1;
-    }
-
-    if (o->shm_name[0] != '/') {
-        fprintf(stderr, "--shm-name must start with '/'\n");
+    if (o->tcp_port == 0) {
+        fprintf(stderr, "invalid --tcp-port\n");
         return -1;
     }
 
@@ -474,11 +479,10 @@ static int run_stream_command(const StreamOptions* opt) {
     signal(SIGTERM, on_signal);
 
     fprintf(stderr,
-            "options: host=%s app=%s shm=%s %dx%d@%d bitrate=%d cs=%u range=%u key_dir=%s control=%s:%d\n",
-            opt->host, opt->app, opt->shm_name,
+            "options: host=%s app=%s tcp=%s:%d stream_id=%u %dx%d@%d bitrate=%d key_dir=%s control=%s:%d\n",
+            opt->host, opt->app, opt->tcp_host, opt->tcp_port, opt->stream_id,
             opt->width, opt->height, opt->fps, opt->bitrate,
-            opt->shm_color_space, opt->shm_color_range, opt->key_dir,
-            opt->control_bind, opt->control_port);
+            opt->key_dir, opt->control_bind, opt->control_port);
 
     SERVER_DATA server;
     memset(&server, 0, sizeof(server));
@@ -537,11 +541,13 @@ static int run_stream_command(const StreamOptions* opt) {
 
     WorkerRenderConfig render_cfg;
     memset(&render_cfg, 0, sizeof(render_cfg));
-    snprintf(render_cfg.shm_name, sizeof(render_cfg.shm_name), "%s", opt->shm_name);
-    render_cfg.slot_count = 2;
-    render_cfg.color_space = opt->shm_color_space;
-    render_cfg.color_range = opt->shm_color_range;
+    snprintf(render_cfg.tcp_host, sizeof(render_cfg.tcp_host), "%s", opt->tcp_host);
+    render_cfg.tcp_port = opt->tcp_port;
+    render_cfg.stream_id = opt->stream_id;
+    render_cfg.width = (uint32_t)opt->width;
+    render_cfg.height = (uint32_t)opt->height;
     render_cfg.fps = (uint32_t)opt->fps;
+    render_cfg.bitrate = (uint32_t)opt->bitrate;
     render_cfg.fatal_code = &fatal_code;
 
     connection_callbacks_set_fatal_code(&fatal_code);

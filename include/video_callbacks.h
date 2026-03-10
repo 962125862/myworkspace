@@ -3,14 +3,21 @@
 
 #include <stdint.h>
 #include <Limelight.h>
-#include "shm_writer.h"
+#include "tcp_sender.h"
 
 typedef struct {
-    char shm_name[ML_SHM_NAME_MAX];
-    uint32_t slot_count;
-    uint32_t color_space;   /* ML_COLOR_SPACE_* */
-    uint32_t color_range;   /* ML_COLOR_RANGE_* */
+    /* TCP服务端配置 */
+    char tcp_host[256];     /* 服务端IP地址 */
+    uint16_t tcp_port;      /* 服务端端口 */
+    uint16_t stream_id;     /* 流标识符 (1-65535) */
+
+    /* 视频参数 */
+    uint32_t width;
+    uint32_t height;
     uint32_t fps;
+    uint32_t bitrate;
+
+    /* 错误码指针 */
     volatile int* fatal_code;
 } WorkerRenderConfig;
 

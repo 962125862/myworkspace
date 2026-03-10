@@ -24,6 +24,9 @@ CMAKE_AR:FILEPATH=/usr/bin/ar
 // MinSizeRel ...
 CMAKE_BUILD_TYPE:STRING=
 
+//Enable/Disable color output during build.
+CMAKE_COLOR_MAKEFILE:BOOL=ON
+
 //CXX compiler
 CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++
 
@@ -106,8 +109,8 @@ CMAKE_INSTALL_PREFIX:PATH=/usr/local
 //Path to a program.
 CMAKE_LINKER:FILEPATH=/usr/bin/ld
 
-//Program used to build from build.ninja files.
-CMAKE_MAKE_PROGRAM:FILEPATH=/usr/bin/ninja
+//Path to a program.
+CMAKE_MAKE_PROGRAM:FILEPATH=/usr/bin/gmake
 
 //Flags used by the linker during the creation of modules during
 // all build types.
@@ -297,12 +300,6 @@ pkgcfg_lib_AVAHI_avahi-client:FILEPATH=/usr/lib/x86_64-linux-gnu/libavahi-client
 pkgcfg_lib_AVAHI_avahi-common:FILEPATH=/usr/lib/x86_64-linux-gnu/libavahi-common.so
 
 //Path to a library.
-pkgcfg_lib_AVCODEC_avcodec:FILEPATH=/usr/lib/x86_64-linux-gnu/libavcodec.so
-
-//Path to a library.
-pkgcfg_lib_AVUTIL_avutil:FILEPATH=/usr/lib/x86_64-linux-gnu/libavutil.so
-
-//Path to a library.
 pkgcfg_lib_PC_CURL_curl:FILEPATH=/usr/lib/x86_64-linux-gnu/libcurl.so
 
 //Path to a library.
@@ -354,76 +351,6 @@ AVAHI_avahi-client_INCLUDEDIR:INTERNAL=
 AVAHI_avahi-client_LIBDIR:INTERNAL=
 AVAHI_avahi-client_PREFIX:INTERNAL=
 AVAHI_avahi-client_VERSION:INTERNAL=
-AVCODEC_CFLAGS:INTERNAL=-I/usr/include/x86_64-linux-gnu
-AVCODEC_CFLAGS_I:INTERNAL=
-AVCODEC_CFLAGS_OTHER:INTERNAL=
-AVCODEC_FOUND:INTERNAL=1
-AVCODEC_INCLUDEDIR:INTERNAL=/usr/include/x86_64-linux-gnu
-AVCODEC_INCLUDE_DIRS:INTERNAL=/usr/include/x86_64-linux-gnu
-AVCODEC_LDFLAGS:INTERNAL=-L/usr/lib/x86_64-linux-gnu;-lavcodec
-AVCODEC_LDFLAGS_OTHER:INTERNAL=
-AVCODEC_LIBDIR:INTERNAL=/usr/lib/x86_64-linux-gnu
-AVCODEC_LIBRARIES:INTERNAL=avcodec
-AVCODEC_LIBRARY_DIRS:INTERNAL=/usr/lib/x86_64-linux-gnu
-AVCODEC_LIBS:INTERNAL=
-AVCODEC_LIBS_L:INTERNAL=
-AVCODEC_LIBS_OTHER:INTERNAL=
-AVCODEC_LIBS_PATHS:INTERNAL=
-AVCODEC_MODULE_NAME:INTERNAL=libavcodec
-AVCODEC_PREFIX:INTERNAL=/usr
-AVCODEC_STATIC_CFLAGS:INTERNAL=-I/usr/include/x86_64-linux-gnu
-AVCODEC_STATIC_CFLAGS_I:INTERNAL=
-AVCODEC_STATIC_CFLAGS_OTHER:INTERNAL=
-AVCODEC_STATIC_INCLUDE_DIRS:INTERNAL=/usr/include/x86_64-linux-gnu
-AVCODEC_STATIC_LDFLAGS:INTERNAL=-L/usr/lib/x86_64-linux-gnu;-lavcodec;-lvpx;-lm;-lvpx;-lm;-lvpx;-lm;-lvpx;-lm;-lwebpmux;-pthread;-lm;-latomic;-llzma;-ldav1d;-lrsvg-2;-lm;-lgio-2.0;-lgdk_pixbuf-2.0;-lgobject-2.0;-lglib-2.0;-lcairo;-lzvbi;-lpthread;-lm;-lpng;-lz;-lsnappy;-lstdc++;-laom;-lcodec2;-lgsm;-ljxl;-ljxl_threads;-lmp3lame;-lm;-lopenjp2;-lopus;-lrav1e;-lm;-lshine;-lspeex;-lSvtAv1Enc;-ltheoraenc;-ltheoradec;-logg;-ltwolame;-lvorbis;-lvorbisenc;-lwebp;-lx264;-lx265;-lxvidcore;-lz;-lva;-L/usr/lib/x86_64-linux-gnu/pkgconfig/../;-lvpl;-ldl;-lstdc++;-L/usr/lib/x86_64-linux-gnu;-lswresample;-lm;-lsoxr;-latomic;-L/usr/lib/x86_64-linux-gnu;-pthread;-lva-drm;-lva;-lva-x11;-lva;-lvdpau;-lX11;-lm;-ldrm;-L/usr/lib/x86_64-linux-gnu/pkgconfig/../;-lvpl;-ldl;-lstdc++;-lOpenCL;-lva;-latomic;-lX11;-lavutil;-pthread;-lva-drm;-lva;-lva-x11;-lva;-lvdpau;-lX11;-lm;-ldrm;-L/usr/lib/x86_64-linux-gnu/pkgconfig/../;-lvpl;-ldl;-lstdc++;-lOpenCL;-lva;-latomic;-lX11
-AVCODEC_STATIC_LDFLAGS_OTHER:INTERNAL=-pthread;-pthread;-pthread
-AVCODEC_STATIC_LIBDIR:INTERNAL=
-AVCODEC_STATIC_LIBRARIES:INTERNAL=avcodec;vpx;m;vpx;m;vpx;m;vpx;m;webpmux;m;atomic;lzma;dav1d;rsvg-2;m;gio-2.0;gdk_pixbuf-2.0;gobject-2.0;glib-2.0;cairo;zvbi;pthread;m;png;z;snappy;stdc++;aom;codec2;gsm;jxl;jxl_threads;mp3lame;m;openjp2;opus;rav1e;m;shine;speex;SvtAv1Enc;theoraenc;theoradec;ogg;twolame;vorbis;vorbisenc;webp;x264;x265;xvidcore;z;va;vpl;dl;stdc++;swresample;m;soxr;atomic;va-drm;va;va-x11;va;vdpau;X11;m;drm;vpl;dl;stdc++;OpenCL;va;atomic;X11;avutil;va-drm;va;va-x11;va;vdpau;X11;m;drm;vpl;dl;stdc++;OpenCL;va;atomic;X11
-AVCODEC_STATIC_LIBRARY_DIRS:INTERNAL=/usr/lib/x86_64-linux-gnu;/usr/lib/x86_64-linux-gnu/pkgconfig/../;/usr/lib/x86_64-linux-gnu;/usr/lib/x86_64-linux-gnu;/usr/lib/x86_64-linux-gnu/pkgconfig/../;/usr/lib/x86_64-linux-gnu/pkgconfig/../
-AVCODEC_STATIC_LIBS:INTERNAL=
-AVCODEC_STATIC_LIBS_L:INTERNAL=
-AVCODEC_STATIC_LIBS_OTHER:INTERNAL=
-AVCODEC_STATIC_LIBS_PATHS:INTERNAL=
-AVCODEC_VERSION:INTERNAL=60.31.102
-AVCODEC_libavcodec_INCLUDEDIR:INTERNAL=
-AVCODEC_libavcodec_LIBDIR:INTERNAL=
-AVCODEC_libavcodec_PREFIX:INTERNAL=
-AVCODEC_libavcodec_VERSION:INTERNAL=
-AVUTIL_CFLAGS:INTERNAL=-I/usr/include/x86_64-linux-gnu
-AVUTIL_CFLAGS_I:INTERNAL=
-AVUTIL_CFLAGS_OTHER:INTERNAL=
-AVUTIL_FOUND:INTERNAL=1
-AVUTIL_INCLUDEDIR:INTERNAL=/usr/include/x86_64-linux-gnu
-AVUTIL_INCLUDE_DIRS:INTERNAL=/usr/include/x86_64-linux-gnu
-AVUTIL_LDFLAGS:INTERNAL=-L/usr/lib/x86_64-linux-gnu;-lavutil
-AVUTIL_LDFLAGS_OTHER:INTERNAL=
-AVUTIL_LIBDIR:INTERNAL=/usr/lib/x86_64-linux-gnu
-AVUTIL_LIBRARIES:INTERNAL=avutil
-AVUTIL_LIBRARY_DIRS:INTERNAL=/usr/lib/x86_64-linux-gnu
-AVUTIL_LIBS:INTERNAL=
-AVUTIL_LIBS_L:INTERNAL=
-AVUTIL_LIBS_OTHER:INTERNAL=
-AVUTIL_LIBS_PATHS:INTERNAL=
-AVUTIL_MODULE_NAME:INTERNAL=libavutil
-AVUTIL_PREFIX:INTERNAL=/usr
-AVUTIL_STATIC_CFLAGS:INTERNAL=-I/usr/include/x86_64-linux-gnu
-AVUTIL_STATIC_CFLAGS_I:INTERNAL=
-AVUTIL_STATIC_CFLAGS_OTHER:INTERNAL=
-AVUTIL_STATIC_INCLUDE_DIRS:INTERNAL=/usr/include/x86_64-linux-gnu
-AVUTIL_STATIC_LDFLAGS:INTERNAL=-L/usr/lib/x86_64-linux-gnu;-lavutil;-pthread;-lva-drm;-lva;-lva-x11;-lva;-lvdpau;-lX11;-lm;-ldrm;-L/usr/lib/x86_64-linux-gnu/pkgconfig/../;-lvpl;-ldl;-lstdc++;-lOpenCL;-lva;-latomic;-lX11
-AVUTIL_STATIC_LDFLAGS_OTHER:INTERNAL=-pthread
-AVUTIL_STATIC_LIBDIR:INTERNAL=
-AVUTIL_STATIC_LIBRARIES:INTERNAL=avutil;va-drm;va;va-x11;va;vdpau;X11;m;drm;vpl;dl;stdc++;OpenCL;va;atomic;X11
-AVUTIL_STATIC_LIBRARY_DIRS:INTERNAL=/usr/lib/x86_64-linux-gnu;/usr/lib/x86_64-linux-gnu/pkgconfig/../
-AVUTIL_STATIC_LIBS:INTERNAL=
-AVUTIL_STATIC_LIBS_L:INTERNAL=
-AVUTIL_STATIC_LIBS_OTHER:INTERNAL=
-AVUTIL_STATIC_LIBS_PATHS:INTERNAL=
-AVUTIL_VERSION:INTERNAL=58.29.100
-AVUTIL_libavutil_INCLUDEDIR:INTERNAL=
-AVUTIL_libavutil_LIBDIR:INTERNAL=
-AVUTIL_libavutil_PREFIX:INTERNAL=
-AVUTIL_libavutil_VERSION:INTERNAL=
 //ADVANCED property for variable: CMAKE_ADDR2LINE
 CMAKE_ADDR2LINE-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_AR
@@ -436,6 +363,8 @@ CMAKE_CACHE_MAJOR_VERSION:INTERNAL=3
 CMAKE_CACHE_MINOR_VERSION:INTERNAL=28
 //Patch version of cmake used to create the current loaded cache
 CMAKE_CACHE_PATCH_VERSION:INTERNAL=3
+//ADVANCED property for variable: CMAKE_COLOR_MAKEFILE
+CMAKE_COLOR_MAKEFILE-ADVANCED:INTERNAL=1
 //Path to CMake executable.
 CMAKE_COMMAND:INTERNAL=/usr/bin/cmake
 //Path to cpack program executable.
@@ -493,7 +422,7 @@ CMAKE_EXPORT_COMPILE_COMMANDS-ADVANCED:INTERNAL=1
 //Name of external makefile project generator.
 CMAKE_EXTRA_GENERATOR:INTERNAL=
 //Name of generator.
-CMAKE_GENERATOR:INTERNAL=Ninja
+CMAKE_GENERATOR:INTERNAL=Unix Makefiles
 //Generator instance identifier.
 CMAKE_GENERATOR_INSTANCE:INTERNAL=
 //Name of generator platform.
@@ -755,14 +684,10 @@ _OPENSSL_openssl_LIBDIR:INTERNAL=
 _OPENSSL_openssl_PREFIX:INTERNAL=
 _OPENSSL_openssl_VERSION:INTERNAL=
 __pkg_config_arguments_AVAHI:INTERNAL=REQUIRED;avahi-client
-__pkg_config_arguments_AVCODEC:INTERNAL=REQUIRED;IMPORTED_TARGET;libavcodec
-__pkg_config_arguments_AVUTIL:INTERNAL=REQUIRED;IMPORTED_TARGET;libavutil
 __pkg_config_arguments_PC_CURL:INTERNAL=QUIET;libcurl
 __pkg_config_arguments_PC_EXPAT:INTERNAL=QUIET;expat
 __pkg_config_arguments__OPENSSL:INTERNAL=QUIET;openssl
 __pkg_config_checked_AVAHI:INTERNAL=1
-__pkg_config_checked_AVCODEC:INTERNAL=1
-__pkg_config_checked_AVUTIL:INTERNAL=1
 __pkg_config_checked_PC_CURL:INTERNAL=1
 __pkg_config_checked_PC_EXPAT:INTERNAL=1
 __pkg_config_checked__OPENSSL:INTERNAL=1
@@ -770,10 +695,6 @@ __pkg_config_checked__OPENSSL:INTERNAL=1
 pkgcfg_lib_AVAHI_avahi-client-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: pkgcfg_lib_AVAHI_avahi-common
 pkgcfg_lib_AVAHI_avahi-common-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: pkgcfg_lib_AVCODEC_avcodec
-pkgcfg_lib_AVCODEC_avcodec-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: pkgcfg_lib_AVUTIL_avutil
-pkgcfg_lib_AVUTIL_avutil-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: pkgcfg_lib_PC_CURL_curl
 pkgcfg_lib_PC_CURL_curl-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: pkgcfg_lib_PC_EXPAT_expat

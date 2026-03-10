@@ -1,28 +1,39 @@
 #include "video_callbacks.h"
-#include "decoder_ffmpeg.h"
 #include "worker_defs.h"
-
-#include <libavcodec/avcodec.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define WORKER_BUFFER_FRAMES 8
 #define SLICES_PER_FRAME 4
-#define INITIAL_DECODER_BUFFER_SIZE 1048576
 
-static unsigned char *ffmpeg_buffer = NULL;
-static size_t ffmpeg_buffer_size = 0;
-
-static ShmWriter g_shm_writer;
-static int g_shm_ready = 0;
+/* TCP发送器实例 */
+static TcpSender g_tcp_sender;
+static int g_tcp_initialized = 0;
 static WorkerRenderConfig* g_cfg = NULL;
 
+/* 预分配帧缓冲区（避免每帧malloc） */
+static uint8_t* g_frame_buffer = NULL;
+static size_t g_frame_buffer_size = 0;
+
+/* 统计信息 */
 static uint64_t g_stats_last_ns = 0;
-static uint64_t g_stats_frames_decoded = 0;
-static uint64_t g_stats_frames_written = 0;
+static uint64_t g_stats_frames_received = 0;
+static uint64_t g_stats_frames_sent = 0;
+static uint64_t g_stats_bytes_sent = 0;
+
+/* 延迟统计 */
+static uint64_t g_stats_total_delay_ns = 0;
+static uint64_t g_stats_max_delay_ns = 0;
+static uint64_t g_stats_delay_samples = 0;
+
+/* 心跳间隔：5秒 */
+#define HEARTBEAT_INTERVAL_NS (5ULL * 1000000000ULL)
+
+/* 重连相关 */
+static uint64_t g_last_reconnect_ns = 0;
+#define RECONNECT_INTERVAL_NS (3ULL * 1000000000ULL)
 
 static uint64_t now_monotonic_ns(void) {
     struct timespec ts;
@@ -36,6 +47,25 @@ static void set_fatal_once(int code) {
     }
 }
 
+/* 确保帧缓冲区足够大（零拷贝预分配） */
+static int ensure_frame_buffer(size_t needed) {
+    if (g_frame_buffer_size >= needed) {
+        return 0;
+    }
+    /* 按2倍增长策略扩容 */
+    size_t new_size = g_frame_buffer_size ? g_frame_buffer_size : (1024 * 1024);
+    while (new_size < needed) {
+        new_size *= 2;
+    }
+    uint8_t* new_buf = realloc(g_frame_buffer, new_size);
+    if (!new_buf) {
+        return -1;
+    }
+    g_frame_buffer = new_buf;
+    g_frame_buffer_size = new_size;
+    return 0;
+}
+
 static void maybe_report_stats(void) {
     uint64_t now = now_monotonic_ns();
 
@@ -47,148 +77,224 @@ static void maybe_report_stats(void) {
     uint64_t delta = now - g_stats_last_ns;
     if (delta >= 1000000000ull) {
         double secs = (double)delta / 1e9;
-        double decoded_fps = g_stats_frames_decoded / secs;
-        double written_fps = g_stats_frames_written / secs;
-        unsigned long long latest_frame_id =
-            (g_shm_ready && g_shm_writer.hdr) ? (unsigned long long)g_shm_writer.hdr->latest_frame_id : 0ull;
+        double received_fps = g_stats_frames_received / secs;
+        double sent_fps = g_stats_frames_sent / secs;
+        double sent_mbps = (g_stats_bytes_sent * 8.0) / (secs * 1000000.0);
+
+        /* 计算平均延迟 */
+        double avg_delay_ms = 0;
+        if (g_stats_delay_samples > 0) {
+            avg_delay_ms = (double)(g_stats_total_delay_ns / g_stats_delay_samples) / 1e6;
+        }
+        double max_delay_ms = (double)g_stats_max_delay_ns / 1e6;
 
         fprintf(stderr,
-                "[video] decoded_fps=%.1f written_fps=%.1f latest_frame_id=%llu\n",
-                decoded_fps, written_fps, latest_frame_id);
+                "[video] fps=%.1f/%.1f mbps=%.2f delay=%.2f/%.2fms buf=%.1fKB state=%s\n",
+                received_fps, sent_fps, sent_mbps,
+                avg_delay_ms, max_delay_ms,
+                g_frame_buffer_size / 1024.0,
+                tcp_sender_state_str(&g_tcp_sender));
 
         g_stats_last_ns = now;
-        g_stats_frames_decoded = 0;
-        g_stats_frames_written = 0;
+        g_stats_frames_received = 0;
+        g_stats_frames_sent = 0;
+        g_stats_bytes_sent = 0;
+        g_stats_total_delay_ns = 0;
+        g_stats_max_delay_ns = 0;
+        g_stats_delay_samples = 0;
     }
 }
 
-static int ensure_buf_size(size_t needed) {
-    if (ffmpeg_buffer_size >= needed) {
-        return 0;
-    }
-
-    unsigned char *new_buf = realloc(ffmpeg_buffer, needed);
-    if (!new_buf) {
-        fprintf(stderr, "realloc failed\n");
+/* 尝试连接或重连 */
+static int ensure_connected(void) {
+    if (!g_tcp_initialized) {
         return -1;
     }
 
-    ffmpeg_buffer = new_buf;
-    ffmpeg_buffer_size = needed;
-    memset(ffmpeg_buffer, 0, ffmpeg_buffer_size);
+    /* 已连接，检查心跳 */
+    if (g_tcp_sender.state == TCP_STATE_CONNECTED) {
+        tcp_sender_check_heartbeat(&g_tcp_sender, HEARTBEAT_INTERVAL_NS);
+        return 0;
+    }
+
+    /* 错误状态，需要重连 */
+    if (g_tcp_sender.state == TCP_STATE_ERROR) {
+        uint64_t now = now_monotonic_ns();
+        if (now - g_last_reconnect_ns < RECONNECT_INTERVAL_NS) {
+            return -1; /* 重连间隔未到 */
+        }
+        fprintf(stderr, "tcp_sender: attempting to reconnect...\n");
+        tcp_sender_disconnect(&g_tcp_sender);
+    }
+
+    /* 尝试连接 */
+    if (tcp_sender_connect(&g_tcp_sender) < 0) {
+        g_last_reconnect_ns = now_monotonic_ns();
+        return -1;
+    }
+
     return 0;
 }
 
 static int worker_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
+    (void)videoFormat;
     (void)redrawRate;
     (void)drFlags;
 
     g_cfg = (WorkerRenderConfig*)context;
 
-    if (ffmpeg_init(videoFormat, width, height, 0, WORKER_BUFFER_FRAMES, SLICES_PER_FRAME) < 0) {
-        fprintf(stderr, "Couldn't initialize video decoding\n");
+    if (!g_cfg) {
+        fprintf(stderr, "worker_setup: missing configuration\n");
         return -1;
     }
 
-    if (ensure_buf_size(INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE) < 0) {
+    /* 初始化TCP发送器配置 */
+    TcpSenderConfig tcp_config;
+    memset(&tcp_config, 0, sizeof(tcp_config));
+
+    snprintf(tcp_config.host, sizeof(tcp_config.host), "%s",
+             g_cfg->tcp_host[0] ? g_cfg->tcp_host : "127.0.0.1");
+    tcp_config.port = g_cfg->tcp_port ? g_cfg->tcp_port : 9000;
+    tcp_config.stream_id = g_cfg->stream_id ? g_cfg->stream_id : 1;
+    tcp_config.width = (uint32_t)width;
+    tcp_config.height = (uint32_t)height;
+    tcp_config.fps = g_cfg->fps ? g_cfg->fps : 60;
+    tcp_config.bitrate = g_cfg->bitrate ? g_cfg->bitrate : 10000;
+
+    /* 保存到全局配置 */
+    g_cfg->width = (uint32_t)width;
+    g_cfg->height = (uint32_t)height;
+
+    /* 初始化TCP发送器 */
+    if (tcp_sender_init(&g_tcp_sender, &tcp_config) < 0) {
+        fprintf(stderr, "worker_setup: tcp_sender_init failed\n");
+        set_fatal_once(WORKER_FATAL_TCP_CONNECT);
         return -1;
     }
 
-    const char* shm_name = "/ml_stream_00";
-    uint32_t slot_count = 2;
-    uint32_t color_space = ML_COLOR_SPACE_UNKNOWN;
-    uint32_t color_range = ML_COLOR_RANGE_UNKNOWN;
-    uint32_t fps = 0;
+    g_tcp_initialized = 1;
 
-    if (g_cfg) {
-        if (g_cfg->shm_name[0] != '\0') {
-            shm_name = g_cfg->shm_name;
-        }
-        if (g_cfg->slot_count != 0) {
-            slot_count = g_cfg->slot_count;
-        }
-        color_space = g_cfg->color_space;
-        color_range = g_cfg->color_range;
-        fps = g_cfg->fps;
+    /* 尝试连接 */
+    if (tcp_sender_connect(&g_tcp_sender) < 0) {
+        fprintf(stderr, "worker_setup: tcp_sender_connect failed, will retry on first frame\n");
+        /* 不立即返回错误，允许后续重连 */
     }
 
-    if (shm_writer_open(&g_shm_writer, shm_name, width, height, slot_count, color_space, color_range, fps) < 0) {
-        fprintf(stderr, "Couldn't create shared memory writer\n");
-        set_fatal_once(WORKER_FATAL_SHM_OPEN);
-        return -1;
-    }
-
-    g_shm_ready = 1;
-    shm_writer_set_status(&g_shm_writer, ML_STREAM_STATUS_RUNNING, 0);
-
-    fprintf(stderr, "shm writer ready: %s (%dx%d)\n", shm_name, width, height);
+    fprintf(stderr, "video worker ready: stream_id=%u -> %s:%d (%dx%d@%u)\n",
+            tcp_config.stream_id, tcp_config.host, tcp_config.port,
+            width, height, tcp_config.fps);
 
     g_stats_last_ns = now_monotonic_ns();
-    g_stats_frames_decoded = 0;
-    g_stats_frames_written = 0;
+    g_stats_frames_received = 0;
+    g_stats_frames_sent = 0;
+    g_stats_bytes_sent = 0;
+    g_last_reconnect_ns = 0;
 
     return 0;
 }
 
 static void worker_cleanup(void) {
-    if (g_shm_ready) {
-        shm_writer_set_status(&g_shm_writer, ML_STREAM_STATUS_STOPPED, 0);
-        shm_writer_close(&g_shm_writer, 0);
-        g_shm_ready = 0;
+    if (g_tcp_initialized) {
+        tcp_sender_destroy(&g_tcp_sender);
+        g_tcp_initialized = 0;
     }
 
-    ffmpeg_destroy();
-
-    free(ffmpeg_buffer);
-    ffmpeg_buffer = NULL;
-    ffmpeg_buffer_size = 0;
+    /* 释放预分配缓冲区 */
+    free(g_frame_buffer);
+    g_frame_buffer = NULL;
+    g_frame_buffer_size = 0;
 
     g_cfg = NULL;
 }
 
-static int worker_submit_decode_unit(PDECODE_UNIT decodeUnit) {
-    PLENTRY entry = decodeUnit->bufferList;
-    int length = 0;
-
-    if (ensure_buf_size((size_t)decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE) < 0) {
-        return DR_NEED_IDR;
+static int is_idr_frame(const uint8_t* data, size_t length) {
+    if (length < 5) {
+        return 0;
     }
 
+    /* 查找NAL单元起始码 */
+    size_t i = 0;
+    while (i < length - 4) {
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
+            /* 找到起始码 0x00000001 */
+            uint8_t nal_unit_type = data[i+4] & 0x1F;
+            /* H.264 IDR帧的NAL单元类型为5 */
+            if (nal_unit_type == 5) {
+                return 1;
+            }
+            i += 4;
+        } else if (i < length - 3 && data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
+            /* 找到起始码 0x000001 */
+            uint8_t nal_unit_type = data[i+3] & 0x1F;
+            if (nal_unit_type == 5) {
+                return 1;
+            }
+            i += 3;
+        } else {
+            i++;
+        }
+    }
+
+    return 0;
+}
+
+static int worker_submit_decode_unit(PDECODE_UNIT decodeUnit) {
+    PLENTRY entry = decodeUnit->bufferList;
+
+    g_stats_frames_received++;
+
+    /* 记录帧接收时间（用于延迟统计） */
+    uint64_t frame_receive_time = now_monotonic_ns();
+
+    /* 确保连接 */
+    if (ensure_connected() < 0) {
+        maybe_report_stats();
+        return DR_OK;
+    }
+
+    /* 收集所有数据到连续缓冲区 */
+    int total_length = decodeUnit->fullLength;
+    if (total_length <= 0) {
+        maybe_report_stats();
+        return DR_OK;
+    }
+
+    /* 零拷贝：使用预分配缓冲区 */
+    if (ensure_frame_buffer((size_t)total_length) < 0) {
+        fprintf(stderr, "worker_submit_decode_unit: buffer allocation failed for %d bytes\n", total_length);
+        maybe_report_stats();
+        return DR_OK;
+    }
+
+    int offset = 0;
     while (entry != NULL) {
-        memcpy(ffmpeg_buffer + length, entry->data, entry->length);
-        length += entry->length;
+        memcpy(g_frame_buffer + offset, entry->data, entry->length);
+        offset += entry->length;
         entry = entry->next;
     }
 
-    if (ffmpeg_decode(ffmpeg_buffer, length) < 0) {
-        return DR_NEED_IDR;
+    /* 检测是否为IDR帧 */
+    int is_idr = is_idr_frame(g_frame_buffer, total_length);
+
+    /* 通过TCP发送H.264裸流 */
+    if (tcp_sender_send_video(&g_tcp_sender, g_frame_buffer, total_length, is_idr) < 0) {
+        fprintf(stderr, "worker_submit_decode_unit: tcp_sender_send_video failed\n");
+        set_fatal_once(WORKER_FATAL_TCP_SEND);
+        maybe_report_stats();
+        return DR_OK;
     }
 
-    AVFrame* frame;
-    while ((frame = ffmpeg_get_frame(false)) != NULL) {
-        g_stats_frames_decoded++;
-
-        if (g_shm_ready) {
-            int rc = shm_writer_write_i420(&g_shm_writer, frame);
-            if (rc == 0) {
-                g_stats_frames_written++;
-            } else if (rc == -2) {
-                fprintf(stderr,
-                        "fatal: frame size changed from shm %ux%u to decoded %dx%d\n",
-                        g_shm_writer.hdr ? g_shm_writer.hdr->width : 0,
-                        g_shm_writer.hdr ? g_shm_writer.hdr->height : 0,
-                        frame->width, frame->height);
-                shm_writer_set_status(&g_shm_writer, ML_STREAM_STATUS_ERROR, rc);
-                set_fatal_once(WORKER_FATAL_FRAME_SIZE_CHANGED);
-                return DR_NEED_IDR;
-            } else {
-                fprintf(stderr, "fatal: shm_writer_write_i420 failed: %d\n", rc);
-                shm_writer_set_status(&g_shm_writer, ML_STREAM_STATUS_ERROR, rc);
-                set_fatal_once(WORKER_FATAL_SHM_WRITE);
-                return DR_NEED_IDR;
-            }
-        }
+    /* 计算并记录延迟 */
+    uint64_t send_complete_time = now_monotonic_ns();
+    uint64_t delay_ns = send_complete_time - frame_receive_time;
+    g_stats_total_delay_ns += delay_ns;
+    g_stats_delay_samples++;
+    if (delay_ns > g_stats_max_delay_ns) {
+        g_stats_max_delay_ns = delay_ns;
     }
+
+    g_stats_frames_sent++;
+    g_stats_bytes_sent += total_length;
 
     maybe_report_stats();
     return DR_OK;

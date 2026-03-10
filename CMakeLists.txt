@@ -6,21 +6,17 @@ list(APPEND CMAKE_MODULE_PATH
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/moonlight-embedded/cmake"
 )
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
-pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 
 add_subdirectory(third_party/moonlight-common-c third_party/moonlight-common-c-build)
 add_subdirectory(third_party/moonlight-embedded/libgamestream third_party/libgamestream-build)
 
 add_executable(ml_worker
         src/main.c
-        src/decoder_ffmpeg.c
         src/video_callbacks.c
         src/connection_callbacks.c
-        src/shm_writer.c
+        src/tcp_sender.c
         src/control_socket.c
 )
-
 
 target_include_directories(ml_worker PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -31,6 +27,4 @@ target_include_directories(ml_worker PRIVATE
 target_link_libraries(ml_worker PRIVATE
         moonlight-common-c
         gamestream
-        PkgConfig::AVCODEC
-        PkgConfig::AVUTIL
 )
