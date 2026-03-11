@@ -86,6 +86,9 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
 - 该功能需要编译时检测到 `libzmq`（CMake/Makefile 都是“检测到才启用”）
 - 通过环境变量开启：`ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566`
 - 目前实现仅提供“取最新帧”：`GET_LATEST_NV12`（`GET_SHM_NV12` 兼容为同义）
+- 内置 bridge 采用“解码时缓存紧凑 NV12 + ZMQ 发送零拷贝”的方式：
+  - 解码线程更新 per-stream latest cache
+  - 客户端请求只读 cache（不会触发 request_seq / 不会等待下一帧）
 
 运行示例：
 
