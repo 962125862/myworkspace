@@ -23,31 +23,44 @@ int agent_auth_read_and_check(int fd, const char* token, int timeout_ms) {
     if (timeout_ms <= 0) timeout_ms = 3000;
     (void)set_recv_timeout_ms(fd, timeout_ms);
 
+    /* Read a single line without consuming bytes beyond '\n' (TCP may coalesce). */
     char buf[512];
-    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) {
-        return -1;
-    }
-    buf[n] = '\0';
+    for (;;) {
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, MSG_PEEK);
+        if (n <= 0) {
+            return -1;
+        }
+        buf[n] = '\0';
+        char* nl = strchr(buf, '\n');
+        if (!nl) {
+            /* line too long or not yet complete */
+            if ((size_t)n >= sizeof(buf) - 1) {
+                return -1;
+            }
+            continue;
+        }
+        size_t line_len = (size_t)(nl - buf) + 1;
+        /* consume exactly the line */
+        ssize_t c = recv(fd, buf, line_len, 0);
+        if (c != (ssize_t)line_len) {
+            return -1;
+        }
+        buf[line_len] = '\0';
 
-    /* Expect: AUTH <token>\n */
-    const char* p = buf;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (strncmp(p, "AUTH ", 5) != 0) {
-        return -1;
-    }
-    p += 5;
+        /* Expect: AUTH <token>\n */
+        const char* p = buf;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (strncmp(p, "AUTH ", 5) != 0) {
+            return -1;
+        }
+        p += 5;
 
-    char got[256];
-    int gi = 0;
-    while (*p && *p != '\n' && *p != '\r' && gi < (int)sizeof(got) - 1) {
-        got[gi++] = *p++;
+        char got[256];
+        int gi = 0;
+        while (*p && *p != '\n' && *p != '\r' && gi < (int)sizeof(got) - 1) {
+            got[gi++] = *p++;
+        }
+        got[gi] = '\0';
+        return (strcmp(got, token) == 0) ? 0 : -1;
     }
-    got[gi] = '\0';
-
-    if (strcmp(got, token) != 0) {
-        return -1;
-    }
-    return 0;
 }
-
