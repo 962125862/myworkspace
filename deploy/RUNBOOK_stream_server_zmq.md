@@ -76,6 +76,26 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
   ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
 ```
 
+### 1.3 （可选）启用内置 ZMQ bridge（并入 stream_server）
+
+如果你的目标是减少 Python bridge 进程与 SHM 二次拷贝带来的 CPU 开销，可以启用
+`stream_server` 内置的 ROUTER/DEALER ZMQ 服务端。
+
+说明：
+
+- 该功能需要编译时检测到 `libzmq`（CMake/Makefile 都是“检测到才启用”）
+- 通过环境变量开启：`ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566`
+- 目前实现仅提供“取最新帧”：`GET_LATEST_NV12`（`GET_SHM_NV12` 兼容为同义）
+
+运行示例：
+
+```bash
+cd /home/gejun/work/my_ml_work/stream_server
+DECODE_BACKEND=intel ENABLE_SHM=1 \
+ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566 \
+  ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+```
+
 检查：
 
 ```bash
@@ -364,4 +384,3 @@ ps -C python -o pid,%cpu,%mem,rss,etime,cmd | head
 journalctl --user -u stream_server_19000.service -n 100 --no-pager
 journalctl --user -u shm_zmq_bridge_5566.service -n 100 --no-pager
 ```
-
