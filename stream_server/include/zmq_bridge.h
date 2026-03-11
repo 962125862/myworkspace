@@ -44,6 +44,21 @@ extern "C" {
  */
 int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* running_flag);
 
+/**
+ * @brief 在解码线程得到新帧后调用，用于更新 ZMQ “最新帧缓存”。
+ *
+ * 说明：
+ * - 该缓存面向 GET_LATEST_NV12：把 frame 打包成“紧凑 NV12”（无 padding）并缓存。
+ * - 开启内置 ZMQ bridge 后，此路径可以显著降低高请求频率下的 CPU（避免每请求都做大拷贝）。
+ * - 若内置 ZMQ bridge 未启用/未编译 libzmq，则该函数是低成本 no-op。
+ */
+void zmq_bridge_on_new_frame(uint16_t stream_id, const DecodedFrame* frame);
+
+/**
+ * @brief 释放内部缓存（通常进程退出时无需显式调用；用于测试/重载场景）。
+ */
+void zmq_bridge_shutdown(void);
+
 #ifdef __cplusplus
 }
 #endif

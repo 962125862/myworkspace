@@ -31,6 +31,87 @@
 
 #include <zmq.h>
 
+/* ==================== cached compact NV12 per stream (zero-copy on send) ====================
+ *
+ * 目标：
+ * - 解码线程每产出新帧时，打包成“紧凑 NV12”并缓存。
+ * - ZMQ 请求到来时，直接把缓存的 Y/UV buffer 以 zmq_msg_init_data() 方式发送（零拷贝）。
+ *
+ * 实现要点：
+ * - 每个 stream_id 缓存一个 ZmqFrame* 指针（原子交换）。
+ * - ZmqFrame 自带原子引用计数：
+ *     - cache 持有 1 个引用
+ *     - 每个请求发送 y/uv 两个 message，各持有 1 个引用
+ *   当引用计数归零时释放该帧缓存。
+ */
+
+typedef struct ZmqFrame {
+    _Atomic int refcnt;
+    uint16_t stream_id;
+    int width;
+    int height;
+    int64_t pts;
+    int key_frame;
+    uint64_t mono_ns;
+
+    uint8_t* y;
+    uint8_t* uv;
+    size_t y_sz;
+    size_t uv_sz;
+} ZmqFrame;
+
+static _Atomic int g_enabled = 0; /* set to 1 after bind success */
+static _Atomic uint8_t g_want_stream[MAX_STREAMS + 1]; /* set to 1 after first request */
+static pthread_once_t g_latest_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t g_latest_mu[MAX_STREAMS + 1];
+static ZmqFrame* g_latest[MAX_STREAMS + 1];   /* 1..MAX_STREAMS */
+
+static void latest_init_once(void) {
+    for (int i = 0; i <= MAX_STREAMS; i++) {
+        pthread_mutex_init(&g_latest_mu[i], NULL);
+        g_latest[i] = NULL;
+        __atomic_store_n(&g_want_stream[i], 0, __ATOMIC_RELAXED);
+    }
+}
+
+static void frame_free(ZmqFrame* f) {
+    if (!f) return;
+    free(f->y);
+    free(f->uv);
+    free(f);
+}
+
+static void frame_addref(ZmqFrame* f, int n) {
+    if (!f) return;
+    __atomic_add_fetch(&f->refcnt, n, __ATOMIC_RELAXED);
+}
+
+static void frame_release(ZmqFrame* f) {
+    if (!f) return;
+    int v = __atomic_sub_fetch(&f->refcnt, 1, __ATOMIC_ACQ_REL);
+    if (v == 0) {
+        frame_free(f);
+    }
+}
+
+static void zmq_frame_release_cb(void* data, void* hint) {
+    (void)data;
+    frame_release((ZmqFrame*)hint);
+}
+
+void zmq_bridge_shutdown(void) {
+    pthread_once(&g_latest_once, latest_init_once);
+    for (int sid = 1; sid <= MAX_STREAMS; sid++) {
+        pthread_mutex_lock(&g_latest_mu[sid]);
+        ZmqFrame* old = g_latest[sid];
+        g_latest[sid] = NULL;
+        pthread_mutex_unlock(&g_latest_mu[sid]);
+        if (old) frame_release(old); /* drop cache hold */
+        __atomic_store_n(&g_want_stream[sid], 0, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&g_enabled, 0, __ATOMIC_RELAXED);
+}
+
 static uint64_t monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -46,6 +127,13 @@ static int send_frame(void* sock, const void* data, size_t len, int more) {
     int flags = more ? ZMQ_SNDMORE : 0;
     int rc = zmq_msg_send(&msg, sock, flags);
     zmq_msg_close(&msg);
+    return (rc >= 0) ? 0 : -1;
+}
+
+static int send_msg_and_close(void* sock, zmq_msg_t* msg, int more) {
+    int flags = more ? ZMQ_SNDMORE : 0;
+    int rc = zmq_msg_send(msg, sock, flags);
+    zmq_msg_close(msg);
     return (rc >= 0) ? 0 : -1;
 }
 
@@ -95,6 +183,7 @@ static int parse_stream_id_from_json(const char* json, size_t len) {
     return 1;
 }
 
+__attribute__((unused))
 static int pack_compact_nv12(const DecodedFrame* f,
                              uint8_t** out_y, size_t* out_y_sz,
                              uint8_t** out_uv, size_t* out_uv_sz) {
@@ -138,6 +227,63 @@ static int pack_compact_nv12(const DecodedFrame* f,
     *out_y_sz = y_sz;
     *out_uv_sz = uv_sz;
     return 0;
+}
+
+void zmq_bridge_on_new_frame(uint16_t stream_id, const DecodedFrame* frame) {
+    if (!__atomic_load_n(&g_enabled, __ATOMIC_RELAXED)) return;
+    if (!frame) return;
+    if (stream_id < 1 || stream_id > MAX_STREAMS) return;
+    if (!__atomic_load_n(&g_want_stream[stream_id], __ATOMIC_RELAXED)) return;
+    if (frame->format != DECODE_FMT_NV12) return;
+
+    pthread_once(&g_latest_once, latest_init_once);
+
+    int w = frame->width;
+    int h = frame->height;
+    if (w <= 0 || h <= 0) return;
+
+    size_t y_sz = (size_t)w * (size_t)h;
+    size_t uv_sz = (size_t)w * (size_t)h / 2;
+    ZmqFrame* nf = (ZmqFrame*)calloc(1, sizeof(*nf));
+    if (!nf) return;
+    nf->y = (uint8_t*)malloc(y_sz);
+    nf->uv = (uint8_t*)malloc(uv_sz);
+    if (!nf->y || !nf->uv) {
+        frame_free(nf);
+        return;
+    }
+
+    const uint8_t* src_y = frame->data[0];
+    const uint8_t* src_uv = frame->data[1];
+    int ls_y = frame->linesize[0];
+    int ls_uv = frame->linesize[1];
+    if (!src_y || !src_uv || ls_y <= 0 || ls_uv <= 0) {
+        frame_free(nf);
+        return;
+    }
+
+    for (int row = 0; row < h; row++) {
+        memcpy(nf->y + (size_t)row * (size_t)w, src_y + (size_t)row * (size_t)ls_y, (size_t)w);
+    }
+    for (int row = 0; row < h / 2; row++) {
+        memcpy(nf->uv + (size_t)row * (size_t)w, src_uv + (size_t)row * (size_t)ls_uv, (size_t)w);
+    }
+
+    nf->stream_id = stream_id;
+    nf->width = w;
+    nf->height = h;
+    nf->pts = frame->pts;
+    nf->key_frame = frame->key_frame ? 1 : 0;
+    nf->mono_ns = monotonic_ns();
+    nf->y_sz = y_sz;
+    nf->uv_sz = uv_sz;
+    __atomic_store_n(&nf->refcnt, 1, __ATOMIC_RELAXED); /* cache hold */
+
+    pthread_mutex_lock(&g_latest_mu[stream_id]);
+    ZmqFrame* old = g_latest[stream_id];
+    g_latest[stream_id] = nf;
+    pthread_mutex_unlock(&g_latest_mu[stream_id]);
+    if (old) frame_release(old);
 }
 
 typedef struct {
@@ -204,6 +350,7 @@ static void* zmq_bridge_thread(void* p) {
     pthread_mutex_unlock(&arg->start_mu);
 
     fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s\n", arg->bind_addr);
+    __atomic_store_n(&g_enabled, 1, __ATOMIC_RELAXED);
 
     while (!arg->running || *arg->running) {
         /* recv multipart: [identity][optional delim][cmd][json] */
@@ -267,61 +414,70 @@ static void* zmq_bridge_thread(void* p) {
             (void)send_frame(router, "", 0, 1);
         }
 
-        int stream_id = parse_stream_id_from_json(json, json_len);
-        StreamContext* stream = stream_manager_get(arg->mgr, (uint16_t)stream_id);
+            int stream_id = parse_stream_id_from_json(json, json_len);
+            StreamContext* stream = stream_manager_get(arg->mgr, (uint16_t)stream_id);
 
         if (cmd_len == 4 && memcmp(cmd, "PING", 4) == 0) {
             (void)send_frame(router, "OK", 2, 1);
             (void)send_frame(router, "{}", 2, 0);
-        } else if ((cmd_len == strlen("GET_LATEST_NV12") && memcmp(cmd, "GET_LATEST_NV12", cmd_len) == 0) ||
-                   (cmd_len == strlen("GET_SHM_NV12") && memcmp(cmd, "GET_SHM_NV12", cmd_len) == 0)) {
-            if (!stream) {
-                (void)send_frame(router, "ERR", 3, 1);
-                (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
-            } else {
-                pthread_mutex_lock(&stream->lock);
-                DecodedFrame* f = stream->last_frame;
-                if (!f || f->format != DECODE_FMT_NV12) {
-                    pthread_mutex_unlock(&stream->lock);
+            } else if ((cmd_len == strlen("GET_LATEST_NV12") && memcmp(cmd, "GET_LATEST_NV12", cmd_len) == 0) ||
+                       (cmd_len == strlen("GET_SHM_NV12") && memcmp(cmd, "GET_SHM_NV12", cmd_len) == 0)) {
+                if (!stream) {
                     (void)send_frame(router, "ERR", 3, 1);
-                    (void)send_frame(router, "no NV12 frame yet", strlen("no NV12 frame yet"), 0);
+                    (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
                 } else {
-                    /* pack compact */
-                    uint8_t* y = NULL;
-                    uint8_t* uv = NULL;
-                    size_t y_sz = 0, uv_sz = 0;
-                    int key = f->key_frame ? 1 : 0;
-                    int w = f->width;
-                    int h = f->height;
-                    int64_t pts = f->pts;
-                    uint64_t mono = monotonic_ns();
-                    if (pack_compact_nv12(f, &y, &y_sz, &uv, &uv_sz) != 0) {
-                        pthread_mutex_unlock(&stream->lock);
+                    /* Mark this stream as requested so decode thread starts caching it. */
+                    if (stream_id >= 1 && stream_id <= MAX_STREAMS) {
+                        __atomic_store_n(&g_want_stream[stream_id], 1, __ATOMIC_RELAXED);
+                    }
+
+                    pthread_once(&g_latest_once, latest_init_once);
+                    ZmqFrame* f = NULL;
+                    if (stream_id >= 1 && stream_id <= MAX_STREAMS) {
+                        pthread_mutex_lock(&g_latest_mu[stream_id]);
+                        f = g_latest[stream_id];
+                        if (f) frame_addref(f, 1); /* hold during request */
+                        pthread_mutex_unlock(&g_latest_mu[stream_id]);
+                    }
+                    if (!f) {
                         (void)send_frame(router, "ERR", 3, 1);
-                        (void)send_frame(router, "pack nv12 failed", strlen("pack nv12 failed"), 0);
+                        (void)send_frame(router, "no cached frame yet", strlen("no cached frame yet"), 0);
                     } else {
-                        pthread_mutex_unlock(&stream->lock);
+                        /* Hold refs for y+uv messages */
+                        frame_addref(f, 2);
 
                         char meta[256];
-                        int n = snprintf(meta, sizeof(meta),
-                                         "{\"stream_id\":%d,\"width\":%d,\"height\":%d,\"pts\":%lld,\"mono_ns\":%llu,\"key_frame\":%d}",
-                                         stream_id, w, h, (long long)pts, (unsigned long long)mono, key);
-                        if (n < 0) n = 0;
-                        if ((size_t)n >= sizeof(meta)) n = (int)sizeof(meta) - 1;
+                        int meta_n = snprintf(meta, sizeof(meta),
+                                              "{\"stream_id\":%d,\"width\":%d,\"height\":%d,\"pts\":%lld,\"mono_ns\":%llu,\"key_frame\":%d}",
+                                              (int)f->stream_id, f->width, f->height,
+                                              (long long)f->pts, (unsigned long long)f->mono_ns, f->key_frame);
+                        if (meta_n < 0) meta_n = 0;
+                        if ((size_t)meta_n >= sizeof(meta)) meta_n = (int)sizeof(meta) - 1;
 
-                        (void)send_frame(router, "OK", 2, 1);
-                        (void)send_frame(router, meta, (size_t)n, 1);
-                        (void)send_frame(router, y, y_sz, 1);
-                        (void)send_frame(router, uv, uv_sz, 0);
-                        free(y);
-                        free(uv);
+                        zmq_msg_t ymsg;
+                        zmq_msg_t uvmsg;
+                        if (zmq_msg_init_data(&ymsg, f->y, f->y_sz, zmq_frame_release_cb, f) != 0 ||
+                            zmq_msg_init_data(&uvmsg, f->uv, f->uv_sz, zmq_frame_release_cb, f) != 0) {
+                            /* init_data failed; drop refs */
+                            frame_release(f);
+                            frame_release(f);
+                            (void)send_frame(router, "ERR", 3, 1);
+                            (void)send_frame(router, "zmq msg init failed", strlen("zmq msg init failed"), 0);
+                        } else {
+                            (void)send_frame(router, "OK", 2, 1);
+                            (void)send_frame(router, meta, (size_t)meta_n, 1);
+                            (void)send_msg_and_close(router, &ymsg, 1);
+                            (void)send_msg_and_close(router, &uvmsg, 0);
+                        }
+
+                        /* drop request hold */
+                        frame_release(f);
                     }
                 }
+            } else {
+                (void)send_frame(router, "ERR", 3, 1);
+                (void)send_frame(router, "unknown cmd", strlen("unknown cmd"), 0);
             }
-        } else {
-            (void)send_frame(router, "ERR", 3, 1);
-            (void)send_frame(router, "unknown cmd", strlen("unknown cmd"), 0);
-        }
 
         zmq_msg_close(&f0);
         zmq_msg_close(&cmd_msg);
@@ -380,12 +536,22 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
 
 #else /* HAVE_ZMQ */
 
+/* Build without libzmq: provide no-op symbols so core stream can link. */
+
 int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* running_flag) {
     (void)mgr;
     (void)bind_addr;
     (void)running_flag;
     fprintf(stderr, "[ZMQ] bridge not built (HAVE_ZMQ=0)\n");
     return -1;
+}
+
+void zmq_bridge_on_new_frame(uint16_t stream_id, const DecodedFrame* frame) {
+    (void)stream_id;
+    (void)frame;
+}
+
+void zmq_bridge_shutdown(void) {
 }
 
 #endif /* HAVE_ZMQ */

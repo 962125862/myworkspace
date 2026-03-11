@@ -8,6 +8,7 @@
 
 #include "stream.h"
 #include "decoder.h"
+#include "zmq_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -300,6 +301,11 @@ int stream_decode_video(StreamContext* stream, const uint8_t* data, int size) {
             decoder_free_frame(stream->last_frame);
         }
         stream->last_frame = frame;
+
+        /* 可选：更新内置 ZMQ bridge 的“紧凑 NV12 最新帧缓存”。
+         * 该函数在未启用内置 bridge 时是低成本 no-op。
+         */
+        zmq_bridge_on_new_frame(stream->stream_id, frame);
 
         /* 可选：按需发布到共享内存（下游请求时才 memcpy） */
         if (stream->shm_enabled) {
