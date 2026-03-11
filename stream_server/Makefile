@@ -5,6 +5,12 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11 -I./include $(shell pkg-config --cflags libavcodec libavformat libavutil libswscale)
 LDFLAGS = -lpthread -lm $(shell pkg-config --libs libavcodec libavformat libavutil libswscale)
 
+# Optional: builtin ZMQ bridge (requires libzmq dev)
+ifneq ($(shell pkg-config --exists libzmq && echo yes),)
+  CFLAGS += -DHAVE_ZMQ $(shell pkg-config --cflags libzmq)
+  LDFLAGS += $(shell pkg-config --libs libzmq)
+endif
+
 SRCDIR = src
 INCDIR = include
 BUILDDIR = build

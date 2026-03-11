@@ -20,6 +20,16 @@ pkg_check_modules(FFMPEG REQUIRED
 # 查找线程库
 find_package(Threads REQUIRED)
 
+# Optional: ZMQ (builtin bridge)
+pkg_check_modules(ZMQ QUIET libzmq)
+if(ZMQ_FOUND)
+    message(STATUS "libzmq found - builtin ZMQ bridge enabled")
+    list(APPEND HWACCEL_DEFS HAVE_ZMQ)
+    include_directories(${ZMQ_INCLUDE_DIRS})
+else()
+    message(STATUS "libzmq not found - builtin ZMQ bridge disabled")
+endif()
+
 # 检测硬件加速支持
 set(HWACCEL_DEFS "")
 set(HWACCEL_LIBS "")
@@ -103,6 +113,7 @@ set(SOURCES
     src/decoder.c
     src/shm_frame.c
     src/h264_tap.c
+    src/zmq_bridge.c
 )
 
 # 可执行文件
@@ -116,6 +127,7 @@ target_link_libraries(stream_server
     Threads::Threads
     ${FFMPEG_LIBRARIES}
     ${HWACCEL_LIBS}
+    ${ZMQ_LIBRARIES}
     m  # math library
 )
 

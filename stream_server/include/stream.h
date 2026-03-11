@@ -30,6 +30,9 @@
 #include <stdbool.h>
 #include <pthread.h>
 
+/* forward decl for optional ZMQ bridge (does not affect core stream logic) */
+struct ZmqBridgeCtx;
+
 #ifdef __cplusplus
 extern "C" {
 #endif

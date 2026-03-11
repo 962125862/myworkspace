@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "stream.h"
 #include "server.h"
+#include "zmq_bridge.h"
 
 static volatile int g_running = 1;
 
@@ -107,6 +108,12 @@ int main(int argc, char* argv[]) {
     printf("Max connections: %d\n", config.max_connections);
     printf("Stats interval: %ds\n", stats_interval);
     printf("========================================\n\n");
+
+    /* 可选：启动内置 ZMQ bridge（ROUTER），用于对外提供 GET_LATEST_NV12。
+     * 通过环境变量控制，避免改变默认行为。
+     *   ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566
+     */
+    const char* zmq_bind_env = getenv("ZMQ_BRIDGE_BIND");
     
     /* 守护进程模式 */
     if (daemon_mode) {
@@ -121,6 +128,14 @@ int main(int argc, char* argv[]) {
     if (stream_manager_init(&stream_mgr) < 0) {
         fprintf(stderr, "[Main] Failed to init stream manager\n");
         return 1;
+    }
+
+    if (zmq_bind_env && zmq_bind_env[0]) {
+        if (zmq_bridge_start(&stream_mgr, zmq_bind_env, &g_running) == 0) {
+            printf("[Main] ZMQ bridge enabled: %s\n", zmq_bind_env);
+        } else {
+            fprintf(stderr, "[Main] Failed to start ZMQ bridge (maybe not built with libzmq)\n");
+        }
     }
     
     /* 初始化服务器 */
