@@ -144,6 +144,12 @@ typedef struct {
     StreamManager* mgr;
     char bind_addr[128];
     volatile int* running;
+
+    /* startup sync: set by thread after bind attempt */
+    pthread_mutex_t start_mu;
+    pthread_cond_t start_cv;
+    int start_done;
+    int start_ok;
 } ZmqBridgeArg;
 
 static void* zmq_bridge_thread(void* p) {
@@ -152,7 +158,11 @@ static void* zmq_bridge_thread(void* p) {
     void* ctx = zmq_ctx_new();
     if (!ctx) {
         fprintf(stderr, "[ZMQ] zmq_ctx_new failed\n");
-        free(arg);
+        pthread_mutex_lock(&arg->start_mu);
+        arg->start_ok = 0;
+        arg->start_done = 1;
+        pthread_cond_signal(&arg->start_cv);
+        pthread_mutex_unlock(&arg->start_mu);
         return NULL;
     }
 
@@ -160,7 +170,11 @@ static void* zmq_bridge_thread(void* p) {
     if (!router) {
         fprintf(stderr, "[ZMQ] zmq_socket(ROUTER) failed\n");
         zmq_ctx_term(ctx);
-        free(arg);
+        pthread_mutex_lock(&arg->start_mu);
+        arg->start_ok = 0;
+        arg->start_done = 1;
+        pthread_cond_signal(&arg->start_cv);
+        pthread_mutex_unlock(&arg->start_mu);
         return NULL;
     }
 
@@ -174,9 +188,20 @@ static void* zmq_bridge_thread(void* p) {
         fprintf(stderr, "[ZMQ] bind failed: %s (%s)\n", arg->bind_addr, zmq_strerror(errno));
         zmq_close(router);
         zmq_ctx_term(ctx);
-        free(arg);
+        pthread_mutex_lock(&arg->start_mu);
+        arg->start_ok = 0;
+        arg->start_done = 1;
+        pthread_cond_signal(&arg->start_cv);
+        pthread_mutex_unlock(&arg->start_mu);
         return NULL;
     }
+
+    /* notify start ok */
+    pthread_mutex_lock(&arg->start_mu);
+    arg->start_ok = 1;
+    arg->start_done = 1;
+    pthread_cond_signal(&arg->start_cv);
+    pthread_mutex_unlock(&arg->start_mu);
 
     fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s\n", arg->bind_addr);
 
@@ -251,13 +276,15 @@ static void* zmq_bridge_thread(void* p) {
         } else if ((cmd_len == strlen("GET_LATEST_NV12") && memcmp(cmd, "GET_LATEST_NV12", cmd_len) == 0) ||
                    (cmd_len == strlen("GET_SHM_NV12") && memcmp(cmd, "GET_SHM_NV12", cmd_len) == 0)) {
             if (!stream) {
-                (void)send_frame(router, "ERR", 3, 0);
+                (void)send_frame(router, "ERR", 3, 1);
+                (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
             } else {
                 pthread_mutex_lock(&stream->lock);
                 DecodedFrame* f = stream->last_frame;
                 if (!f || f->format != DECODE_FMT_NV12) {
                     pthread_mutex_unlock(&stream->lock);
-                    (void)send_frame(router, "ERR", 3, 0);
+                    (void)send_frame(router, "ERR", 3, 1);
+                    (void)send_frame(router, "no NV12 frame yet", strlen("no NV12 frame yet"), 0);
                 } else {
                     /* pack compact */
                     uint8_t* y = NULL;
@@ -270,7 +297,8 @@ static void* zmq_bridge_thread(void* p) {
                     uint64_t mono = monotonic_ns();
                     if (pack_compact_nv12(f, &y, &y_sz, &uv, &uv_sz) != 0) {
                         pthread_mutex_unlock(&stream->lock);
-                        (void)send_frame(router, "ERR", 3, 0);
+                        (void)send_frame(router, "ERR", 3, 1);
+                        (void)send_frame(router, "pack nv12 failed", strlen("pack nv12 failed"), 0);
                     } else {
                         pthread_mutex_unlock(&stream->lock);
 
@@ -291,7 +319,8 @@ static void* zmq_bridge_thread(void* p) {
                 }
             }
         } else {
-            (void)send_frame(router, "ERR", 3, 0);
+            (void)send_frame(router, "ERR", 3, 1);
+            (void)send_frame(router, "unknown cmd", strlen("unknown cmd"), 0);
         }
 
         zmq_msg_close(&f0);
@@ -313,11 +342,38 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
     arg->running = running_flag;
     strncpy(arg->bind_addr, bind_addr, sizeof(arg->bind_addr) - 1);
 
+    pthread_mutex_init(&arg->start_mu, NULL);
+    pthread_cond_init(&arg->start_cv, NULL);
+    arg->start_done = 0;
+    arg->start_ok = 0;
+
     pthread_t th;
     if (pthread_create(&th, NULL, zmq_bridge_thread, arg) != 0) {
+        pthread_cond_destroy(&arg->start_cv);
+        pthread_mutex_destroy(&arg->start_mu);
         free(arg);
         return -1;
     }
+
+    /* wait for bind result */
+    pthread_mutex_lock(&arg->start_mu);
+    while (!arg->start_done) {
+        pthread_cond_wait(&arg->start_cv, &arg->start_mu);
+    }
+    int ok = arg->start_ok;
+    pthread_mutex_unlock(&arg->start_mu);
+
+    /* start sync no longer used after this point */
+    pthread_cond_destroy(&arg->start_cv);
+    pthread_mutex_destroy(&arg->start_mu);
+
+    if (!ok) {
+        /* thread will exit quickly on failure; join to avoid leaks */
+        pthread_join(th, NULL);
+        free(arg);
+        return -1;
+    }
+
     pthread_detach(th);
     return 0;
 }
