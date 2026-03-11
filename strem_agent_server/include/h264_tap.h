@@ -14,6 +14,11 @@ extern "C" {
 int h264_tap_start(const char* bind_ip, uint16_t port);
 void h264_tap_stop(void);
 
+/* Optional: require AUTH <token> on video connections.
+ * If token is NULL/empty, auth is disabled.
+ */
+void h264_tap_set_token(const char* token);
+
 void h264_tap_publish(uint16_t stream_id, const uint8_t* data, int size);
 
 #ifdef __cplusplus
@@ -21,4 +26,3 @@ void h264_tap_publish(uint16_t stream_id, const uint8_t* data, int size);
 #endif
 
 #endif /* AGENT_H264_TAP_H */
-

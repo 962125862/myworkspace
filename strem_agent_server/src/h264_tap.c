@@ -22,6 +22,36 @@
 
 #include "tlv_protocol.h" /* for MAX_STREAMS */
 
+/* token for AUTH on video connections */
+static char g_video_token[256] = {0};
+
+void h264_tap_set_token(const char* token) {
+    if (!token) {
+        g_video_token[0] = '\0';
+        return;
+    }
+    snprintf(g_video_token, sizeof(g_video_token), "%s", token);
+}
+
+static int read_and_check_auth_line(int fd) {
+    if (g_video_token[0] == '\0') return 0;
+    char buf[512];
+    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    const char* p = buf;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (strncmp(p, "AUTH ", 5) != 0) return -1;
+    p += 5;
+    char got[256];
+    int gi = 0;
+    while (*p && *p != '\n' && *p != '\r' && gi < (int)sizeof(got) - 1) {
+        got[gi++] = *p++;
+    }
+    got[gi] = '\0';
+    return (strcmp(got, g_video_token) == 0) ? 0 : -1;
+}
+
 #define TAP_MAX_CLIENTS 16
 
 typedef struct {
@@ -198,6 +228,13 @@ static void* accept_loop(void* arg) {
         }
 
         set_nonblocking(fd);
+
+        /* If token enabled, expect AUTH line first. */
+        if (read_and_check_auth_line(fd) != 0) {
+            close(fd);
+            continue;
+        }
+
         uint16_t sid = read_subscribe_stream_id(fd);
 
         pthread_mutex_lock(&g_tap.lock);

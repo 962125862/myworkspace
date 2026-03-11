@@ -216,6 +216,9 @@ int main(int argc, char** argv) {
         return 3;
     }
 
+    /* token applies to both video and ctrl tcp */
+    h264_tap_set_token(cfg.token);
+
     pthread_t th_ingest;
     pthread_t th_ctrl;
     pthread_create(&th_ingest, NULL, ingest_thread, &cfg);
