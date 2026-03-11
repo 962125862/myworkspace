@@ -84,10 +84,52 @@ python strem_agent_client/strem_agent_client.py --host <server_ip> --token your_
 
 ## 4) 快速排查
 
+## 5) 本地一机自测（不依赖 GUI）
+
+### 5.1 启动 strem_agent_server（本机）
+
+```bash
+make -C strem_agent_server -j
+
+./strem_agent_server/build/strem_agent_server \
+  --in-host 127.0.0.1 --in-port 19000 \
+  --video-bind 127.0.0.1 --video-port 31234 \
+  --ctrl-bind 127.0.0.1 --ctrl-port 31235 \
+  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 50001
+```
+
+### 5.2 配置 ml_worker 推到本机 agent
+
+复制示例配置并修改 worker 名称：
+
+```bash
+cp -v deploy/workers/worker_local_agent.conf.example deploy/workers/worker_local_agent.conf
+```
+
+确保 `deploy/workers/worker_local_agent.conf`：
+
+- `TCP_HOST=127.0.0.1`
+- `TCP_PORT=19000`
+
+启动：
+
+```bash
+./deploy/mlctl.sh up worker_local_agent
+./deploy/mlctl.sh logs worker_local_agent
+```
+
+### 5.3 headless 拉一帧保存 PNG（无窗口）
+
+```bash
+python3 strem_agent_client/strem_agent_client_save_png.py \
+  --host 127.0.0.1 --video-port 31234 --stream-id 1 \
+  --out /tmp/agent_frame.png
+ls -l /tmp/agent_frame.png
+```
+
 ### 4.1 只验证视频输出（不用 client）
 
 ```bash
 ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
   -f h264 tcp://<server_ip>:31234
 ```
-
