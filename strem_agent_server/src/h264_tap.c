@@ -29,6 +29,12 @@
 /* token for AUTH on video connections */
 static char g_video_token[256] = {0};
 
+static inline uint64_t monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 void h264_tap_set_token(const char* token) {
     if (!token) {
         g_video_token[0] = '\0';
@@ -37,23 +43,106 @@ void h264_tap_set_token(const char* token) {
     snprintf(g_video_token, sizeof(g_video_token), "%s", token);
 }
 
-static int read_and_check_auth_line(int fd) {
-    if (g_video_token[0] == '\0') return 0;
-    char buf[512];
-    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) return -1;
-    buf[n] = '\0';
-    const char* p = buf;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (strncmp(p, "AUTH ", 5) != 0) return -1;
-    p += 5;
-    char got[256];
-    int gi = 0;
-    while (*p && *p != '\n' && *p != '\r' && gi < (int)sizeof(got) - 1) {
-        got[gi++] = *p++;
+static int parse_sub_line(const char* line, uint16_t* out_sid) {
+    if (!line || !out_sid) return -1;
+    int sid = -1;
+    if (sscanf(line, "SUB %d", &sid) == 1 || sscanf(line, "%d", &sid) == 1) {
+        if (sid < 1) sid = 1;
+        if (sid > MAX_STREAMS) sid = MAX_STREAMS;
+        *out_sid = (uint16_t)sid;
+        return 0;
     }
-    got[gi] = '\0';
-    return (strcmp(got, g_video_token) == 0) ? 0 : -1;
+    return -1;
+}
+
+/* Handshake: require SUB line; if token enabled, require AUTH line first.
+ * This function is robust to AUTH and SUB being sent in the same TCP packet.
+ */
+static int do_handshake(int fd, uint16_t* out_sid) {
+    if (!out_sid) return -1;
+
+    const int timeout_ms = 3000;
+    const uint64_t deadline = monotonic_ns() + (uint64_t)timeout_ms * 1000000ull;
+
+    bool need_auth = (g_video_token[0] != '\0');
+    bool authed = !need_auth;
+    bool got_sub = false;
+    uint16_t sid = 1;
+
+    char buf[1024];
+    size_t len = 0;
+
+    while (monotonic_ns() < deadline) {
+        ssize_t n = recv(fd, buf + len, sizeof(buf) - 1 - len, 0);
+        if (n > 0) {
+            len += (size_t)n;
+            buf[len] = '\0';
+
+            /* parse complete lines */
+            char* start = buf;
+            while (1) {
+                char* nl = strchr(start, '\n');
+                if (!nl) break;
+                *nl = '\0';
+                /* trim CR */
+                size_t L = strlen(start);
+                while (L > 0 && (start[L - 1] == '\r' || start[L - 1] == ' ' || start[L - 1] == '\t')) {
+                    start[--L] = '\0';
+                }
+
+                if (!authed) {
+                    if (strncmp(start, "AUTH ", 5) != 0) {
+                        return -1;
+                    }
+                    const char* tok = start + 5;
+                    if (strcmp(tok, g_video_token) != 0) {
+                        return -1;
+                    }
+                    authed = true;
+                } else if (!got_sub) {
+                    if (parse_sub_line(start, &sid) != 0) {
+                        return -1;
+                    }
+                    got_sub = true;
+                    break;
+                }
+
+                start = nl + 1;
+            }
+
+            if (got_sub) {
+                *out_sid = sid;
+                return 0;
+            }
+
+            /* keep remaining partial line */
+            if (start != buf) {
+                size_t remain = strlen(start);
+                memmove(buf, start, remain);
+                len = remain;
+                buf[len] = '\0';
+            }
+            continue;
+        }
+
+        if (n == 0) {
+            return -1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* non-blocking socket */
+            struct timespec ts;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 10 * 1000 * 1000;
+            nanosleep(&ts, NULL);
+            continue;
+        }
+        return -1;
+    }
+
+    return -1;
 }
 
 /* Simplified support for few subscribers (agent usage) */
@@ -114,54 +203,15 @@ static void client_close(TapClient* c) {
     c->sps_len = c->pps_len = 0;
 }
 
-static inline uint64_t monotonic_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-/* Read a subscribe line (best effort). Supports: "SUB 3\n" or "3\n" */
-/* Best-effort optional subscribe line.
- * IMPORTANT: do not consume bytes if the peer doesn't actually send an ASCII line,
- * otherwise we'd eat the beginning of H.264 bytestream and break decoding (e.g. ffmpeg/ffplay).
+/* Read a subscribe line (SUB is mandatory in agent).
+ * Client must send: "SUB <stream_id>\n" (optionally preceded by AUTH line).
  */
+/* SUB is mandatory in agent: client must send SUB <stream_id>\n */
 static uint16_t read_subscribe_stream_id(int fd) {
     uint16_t sid = 1;
-
-    char buf[64];
-    ssize_t n = recv(fd, buf, sizeof(buf) - 1, MSG_PEEK);
-    if (n <= 0) {
-        return sid;
+    if (do_handshake(fd, &sid) != 0) {
+        return 0;
     }
-    buf[n] = '\0';
-
-    /* If it doesn't look like ASCII command, assume it's H264 and don't consume. */
-    unsigned char c0 = (unsigned char)buf[0];
-    if (!((c0 >= '0' && c0 <= '9') || c0 == 'S')) {
-        return sid;
-    }
-
-    /* Need a newline to treat as a line-based command. */
-    char* nl = strchr(buf, '\n');
-    if (!nl) {
-        return sid;
-    }
-
-    int parsed = 0;
-    int tmp = 1;
-    if (sscanf(buf, "SUB %d", &tmp) == 1 || sscanf(buf, "%d", &tmp) == 1) {
-        if (tmp < 1) tmp = 1;
-        if (tmp > MAX_STREAMS) tmp = MAX_STREAMS;
-        sid = (uint16_t)tmp;
-        parsed = 1;
-    }
-    if (!parsed) {
-        return 1;
-    }
-
-    /* Consume the line (including newline). */
-    size_t line_len = (size_t)(nl - buf) + 1;
-    (void)recv(fd, buf, line_len, 0);
     return sid;
 }
 
@@ -371,12 +421,11 @@ static void* accept_loop(void* arg) {
 
         set_nonblocking(fd);
 
-        if (read_and_check_auth_line(fd) != 0) {
+        uint16_t sid = read_subscribe_stream_id(fd);
+        if (sid == 0) {
             close(fd);
             continue;
         }
-
-        uint16_t sid = read_subscribe_stream_id(fd);
 
         pthread_mutex_lock(&g_tap.lock);
         int placed = 0;
