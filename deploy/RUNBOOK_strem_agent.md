@@ -129,7 +129,10 @@ ls -l /tmp/agent_frame.png
 
 ### 4.1 只验证视频输出（不用 client）
 
+说明：video 端口要求先发送 `SUB <stream_id>\n`（可选先 AUTH），所以 ffplay 不能直接连。
+可以用本 repo 提供的 python client 保存 .h264 后再用 ffplay 播放。
+
 ```bash
-ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
-  -f h264 tcp://<server_ip>:31234
+python3 stream_server/tests/mock_h264_tap_client.py --host <server_ip> --port 31234 --stream 1 --out /tmp/agent_out.h264
+ffplay -fflags nobuffer -flags low_delay -f h264 -i /tmp/agent_out.h264
 ```
