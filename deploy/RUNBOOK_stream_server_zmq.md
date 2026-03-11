@@ -89,6 +89,7 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
 - 内置 bridge 采用“解码时缓存紧凑 NV12 + ZMQ 发送零拷贝”的方式：
   - 解码线程更新 per-stream latest cache
   - 客户端请求只读 cache（不会触发 request_seq / 不会等待下一帧）
+  - 为避免服务刚启动时返回空，内置 bridge 会在首次请求时用 `last_frame` 立即“种子”一帧到 cache（若存在）。
 
 运行示例：
 
