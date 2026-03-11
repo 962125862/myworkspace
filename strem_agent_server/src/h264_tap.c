@@ -119,20 +119,48 @@ static inline uint64_t monotonic_ns(void) {
 }
 
 /* Read a subscribe line (best effort). Supports: "SUB 3\n" or "3\n" */
+/* Best-effort optional subscribe line.
+ * IMPORTANT: do not consume bytes if the peer doesn't actually send an ASCII line,
+ * otherwise we'd eat the beginning of H.264 bytestream and break decoding (e.g. ffmpeg/ffplay).
+ */
 static uint16_t read_subscribe_stream_id(int fd) {
+    uint16_t sid = 1;
+
     char buf[64];
-    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    ssize_t n = recv(fd, buf, sizeof(buf) - 1, MSG_PEEK);
     if (n <= 0) {
-        return 1; /* default */
+        return sid;
     }
     buf[n] = '\0';
-    int sid = 1;
-    if (sscanf(buf, "SUB %d", &sid) == 1 || sscanf(buf, "%d", &sid) == 1) {
-        if (sid < 1) sid = 1;
-        if (sid > MAX_STREAMS) sid = MAX_STREAMS;
-        return (uint16_t)sid;
+
+    /* If it doesn't look like ASCII command, assume it's H264 and don't consume. */
+    unsigned char c0 = (unsigned char)buf[0];
+    if (!((c0 >= '0' && c0 <= '9') || c0 == 'S')) {
+        return sid;
     }
-    return 1;
+
+    /* Need a newline to treat as a line-based command. */
+    char* nl = strchr(buf, '\n');
+    if (!nl) {
+        return sid;
+    }
+
+    int parsed = 0;
+    int tmp = 1;
+    if (sscanf(buf, "SUB %d", &tmp) == 1 || sscanf(buf, "%d", &tmp) == 1) {
+        if (tmp < 1) tmp = 1;
+        if (tmp > MAX_STREAMS) tmp = MAX_STREAMS;
+        sid = (uint16_t)tmp;
+        parsed = 1;
+    }
+    if (!parsed) {
+        return 1;
+    }
+
+    /* Consume the line (including newline). */
+    size_t line_len = (size_t)(nl - buf) + 1;
+    (void)recv(fd, buf, line_len, 0);
+    return sid;
 }
 
 static bool has_start_code(const uint8_t* p, int n) {
@@ -442,4 +470,3 @@ void h264_tap_stop(void) {
 
     pthread_mutex_destroy(&g_tap.lock);
 }
-
