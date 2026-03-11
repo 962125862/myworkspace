@@ -71,8 +71,17 @@ def main() -> int:
         uv = resp[3]
         return (t1 - t0) * 1000.0, meta, y, uv
 
-    # 1) save png
-    rtt_ms, meta, y, uv = fetch_one()
+    # 1) save png (warm up: tolerate initial "no cached frame yet")
+    last_err = None
+    for _ in range(50):
+        try:
+            rtt_ms, meta, y, uv = fetch_one()
+            break
+        except Exception as e:
+            last_err = e
+            time.sleep(0.05)
+    else:
+        raise SystemExit(f"failed to fetch first frame: {last_err}")
     w = int(meta["width"])
     h = int(meta["height"])
     bgr = nv12_to_bgr(w, h, y, uv)
@@ -130,4 +139,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
