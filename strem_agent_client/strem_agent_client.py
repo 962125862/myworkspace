@@ -94,30 +94,7 @@ class CtrlSender:
     def mouse_abs(self, x, y, ref_w=0, ref_h=0):
         self._send(ML_CTRL_CMD_MOUSE_ABS, x, y, ref_w, ref_h)
 
-    def mouse_rel(self, dx, dy):
-        self._send(ML_CTRL_CMD_MOUSE_REL, dx, dy)
-
-    def button(self, button=BUTTON_LEFT, pressed=True):
-        action = BUTTON_ACTION_PRESS if pressed else BUTTON_ACTION_RELEASE
-        self._send(ML_CTRL_CMD_MOUSE_BUTTON, action, button)
-
-    def click(self, button=BUTTON_LEFT):
-        self._send(ML_CTRL_CMD_MOUSE_CLICK, button)
-
-    def scroll(self, clicks: int):
-        self._send(ML_CTRL_CMD_MOUSE_SCROLL, int(clicks))
-
-    # ---------- keyboard ----------
-    def key(self, key_code: int, action: int, modifiers: int = 0):
-        self._send(ML_CTRL_CMD_KEYBOARD, key_code, action, modifiers)
-
-    def key_press(self, key_code: int, modifiers: int = 0):
-        self._send(ML_CTRL_CMD_KEY_PRESS, key_code, modifiers)
-
-    # ---------- text ----------
-    def text(self, s: str):
-        payload = s.encode("utf-8")
-        self._send(ML_CTRL_CMD_TEXT, len(payload), payload=payload)
+    # Note: v1 only supports mouse move (ABS). No click/keyboard/text.
 
 
 @dataclass
@@ -210,26 +187,13 @@ def main() -> int:
     state = {"down": False}
 
     def mouse_cb(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            state["down"] = True
-            ctrl.button(BUTTON_LEFT, pressed=True)
-        elif event == cv2.EVENT_LBUTTONUP:
-            state["down"] = False
-            ctrl.button(BUTTON_LEFT, pressed=False)
-        elif event == cv2.EVENT_MOUSEMOVE:
+        if event == cv2.EVENT_MOUSEMOVE:
             # send abs in current window coord system; ref_w/ref_h filled by client-side image size
             with lock:
                 img = latest["img"]
             if img is not None:
                 h, w = img.shape[:2]
                 ctrl.mouse_abs(x, y, w, h)
-        elif event == cv2.EVENT_MOUSEWHEEL:
-            # flags contains wheel delta in high 16 bits on some platforms; OpenCV behavior varies.
-            delta = (flags >> 16) & 0xFFFF
-            if delta & 0x8000:
-                delta = delta - 0x10000
-            if delta:
-                ctrl.scroll(1 if delta > 0 else -1)
 
     cv2.setMouseCallback(win, mouse_cb)
 
@@ -242,10 +206,6 @@ def main() -> int:
         k = cv2.waitKey(1) & 0xFF
         if k == 27:  # ESC
             break
-        # very simple keyboard mapping: send ASCII as TEXT
-        if 32 <= k <= 126:
-            ctrl.text(chr(k))
-
         # avoid tight loop when no frames
         if img is None:
             time.sleep(0.01)
@@ -255,4 +215,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
