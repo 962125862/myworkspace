@@ -147,41 +147,60 @@ static bool annexb_contains_nal_type(const uint8_t* p, int n, int nal_type) {
     return false;
 }
 
-static void cache_sps_pps(TapClient* c, const uint8_t* data, int size) {
+static void maybe_cache_param_sets(TapClient* c, const uint8_t* data, int size) {
     if (!c || !data || size <= 0) return;
-    /* NAL type 7 SPS, 8 PPS */
-    if (annexb_contains_nal_type(data, size, 7)) {
-        free(c->sps);
-        c->sps = (uint8_t*)malloc((size_t)size);
-        if (c->sps) {
-            memcpy(c->sps, data, (size_t)size);
-            c->sps_len = (size_t)size;
-        }
+    if (!has_start_code(data, size)) return;
+
+    /* Only cache if this payload looks like a single NAL (lightweight rule):
+     * - has a start code at beginning
+     * - does NOT contain another start code later
+     */
+    for (int i = 4; i + 4 < size; i++) {
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) return;
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) return;
     }
-    if (annexb_contains_nal_type(data, size, 8)) {
-        free(c->pps);
-        c->pps = (uint8_t*)malloc((size_t)size);
-        if (c->pps) {
-            memcpy(c->pps, data, (size_t)size);
-            c->pps_len = (size_t)size;
-        }
+
+    int nal_type = -1;
+    if (size >= 5 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
+        nal_type = data[4] & 0x1F;
+    } else if (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
+        nal_type = data[3] & 0x1F;
     }
+    if (nal_type != 7 && nal_type != 8) return;
+
+    uint8_t** dst = (nal_type == 7) ? &c->sps : &c->pps;
+    size_t* dst_len = (nal_type == 7) ? &c->sps_len : &c->pps_len;
+    uint8_t* nb = (uint8_t*)realloc(*dst, (size_t)size);
+    if (!nb) return;
+    memcpy(nb, data, (size_t)size);
+    *dst = nb;
+    *dst_len = (size_t)size;
 }
 
 static int client_queue_frame(TapClient* c, const uint8_t* data, int size) {
     if (!c || !c->active) return -1;
 
+    maybe_cache_param_sets(c, data, size);
+
     /* If congested, optionally drop until IDR */
     const bool is_idr = annexb_contains_nal_type(data, size, 5);
     if (g_drop_to_idr && c->need_idr && !is_idr) {
-        cache_sps_pps(c, data, size);
         return 0;
     }
 
     /* Ensure start code */
     static const uint8_t sc4[4] = {0, 0, 0, 1};
     int need_sc = has_start_code(data, size) ? 0 : 1;
-    size_t total = (size_t)size + (need_sc ? 4u : 0u);
+
+    /* When recovering (need_idr), prepend cached SPS/PPS if available.
+     * This makes new clients decodable even if SPS/PPS were sent earlier.
+     */
+    size_t total = 0;
+    if (c->need_idr && is_idr) {
+        if (c->sps && c->sps_len) total += c->sps_len;
+        if (c->pps && c->pps_len) total += c->pps_len;
+    }
+    total += (size_t)size + (need_sc ? 4u : 0u);
     if (total > 5 * 1024 * 1024) {
         return -1;
     }
@@ -197,17 +216,28 @@ static int client_queue_frame(TapClient* c, const uint8_t* data, int size) {
     c->out_start_ns = monotonic_ns();
 
     uint8_t* p = c->out_buf;
-    if (need_sc) {
-        memcpy(p, sc4, 4);
-        memcpy(p + 4, data, (size_t)size);
-    } else {
-        memcpy(p, data, (size_t)size);
+    size_t off = 0;
+    if (c->need_idr && is_idr) {
+        if (c->sps && c->sps_len) {
+            memcpy(p + off, c->sps, c->sps_len);
+            off += c->sps_len;
+        }
+        if (c->pps && c->pps_len) {
+            memcpy(p + off, c->pps, c->pps_len);
+            off += c->pps_len;
+        }
     }
+    if (need_sc) {
+        memcpy(p + off, sc4, 4);
+        off += 4;
+    }
+    memcpy(p + off, data, (size_t)size);
+    off += (size_t)size;
+    c->out_len = off;
 
     if (is_idr) {
         c->need_idr = false;
     }
-    cache_sps_pps(c, data, size);
     return 0;
 }
 
