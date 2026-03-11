@@ -72,6 +72,7 @@ typedef struct {
     uint64_t out_start_ns;
 
     bool need_idr;
+    bool pending_idr; /* the pending out_buf contains an IDR used for recovery */
     uint8_t* sps;
     size_t sps_len;
     uint8_t* pps;
@@ -108,6 +109,7 @@ static void client_close(TapClient* c) {
     c->out_cap = c->out_len = c->out_off = 0;
     c->out_start_ns = 0;
     c->need_idr = false;
+    c->pending_idr = false;
     c->sps = c->pps = NULL;
     c->sps_len = c->pps_len = 0;
 }
@@ -252,6 +254,14 @@ static bool flush_out_buf(TapClient* c) {
     c->out_len = 0;
     c->out_off = 0;
     c->out_start_ns = 0;
+
+    /* If we just finished sending a recovery IDR, exit recovery mode.
+     * Without this, we'd keep dropping non-IDR frames until the next IDR.
+     */
+    if (c->pending_idr) {
+        c->pending_idr = false;
+        c->need_idr = false;
+    }
     return true;
 }
 
@@ -332,14 +342,13 @@ void h264_tap_publish(uint16_t stream_id, const uint8_t* data, int size) {
         c->out_off = 0;
         c->out_start_ns = monotonic_ns();
 
+        if (c->need_idr && is_idr) {
+            c->pending_idr = true;
+        }
+
         /* Try immediate flush, non-blocking */
         (void)flush_out_buf(c);
-
-        if (c->need_idr && is_idr) {
-            if (c->out_len == 0) {
-                c->need_idr = false;
-            }
-        }
+        /* need_idr may be cleared inside flush_out_buf() when pending_idr finishes */
     }
     pthread_mutex_unlock(&g_tap.lock);
 }
