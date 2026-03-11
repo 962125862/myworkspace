@@ -14,6 +14,9 @@
  * - 预先维护每路紧凑 NV12 缓冲，解码时更新；请求时零拷贝发送（或单拷贝）。
  */
 
+/* for clock_gettime/CLOCK_MONOTONIC under -std=c11 */
+#define _POSIX_C_SOURCE 200809L
+
 #include "zmq_bridge.h"
 
 #include <errno.h>
@@ -204,7 +207,6 @@ static void* zmq_bridge_thread(void* p) {
         memset(&json_msg, 0, sizeof(json_msg));
 
         /* f1 might be delimiter (REQ compatibility) or cmd */
-        const uint8_t* f1_data = (const uint8_t*)zmq_msg_data(&f1);
         size_t f1_len = zmq_msg_size(&f1);
         if (f1_len == 0) {
             have_delim = 1;
@@ -331,4 +333,3 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
 }
 
 #endif /* HAVE_ZMQ */
-
