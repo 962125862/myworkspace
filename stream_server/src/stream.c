@@ -3,12 +3,22 @@
  * @brief 视频流管理实现
  */
 
+/* for clock_gettime(), CLOCK_MONOTONIC/CLOCK_REALTIME under -std=c11 */
+#define _POSIX_C_SOURCE 200809L
+
 #include "stream.h"
 #include "decoder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include <unistd.h>
+
+static int env_enabled(const char* name) {
+    const char* v = getenv(name);
+    return (v && atoi(v) > 0);
+}
 
 int stream_manager_init(StreamManager* mgr) {
     if (!mgr) {
@@ -22,6 +32,8 @@ int stream_manager_init(StreamManager* mgr) {
         stream->stream_id = i + 1;  /* stream_id 从1开始 */
         snprintf(stream->name, sizeof(stream->name), "stream_%02d", i + 1);
         stream->state = STREAM_STATE_IDLE;
+        stream->shm_enabled = env_enabled("ENABLE_SHM");
+        stream->shm_opened = false;
         pthread_mutex_init(&stream->lock, NULL);
     }
     
@@ -43,6 +55,10 @@ void stream_manager_destroy(StreamManager* mgr) {
     for (int i = 0; i < MAX_STREAMS; i++) {
         StreamContext* stream = &mgr->streams[i];
         stream_close_decoder(stream);
+        if (stream->shm_opened) {
+            shm_frame_writer_close(&stream->shm_writer);
+            stream->shm_opened = false;
+        }
         pthread_mutex_destroy(&stream->lock);
     }
 
@@ -198,6 +214,20 @@ int stream_init_decoder(StreamContext* stream, int backend) {
     
     printf("[Stream %d] Decoder initialized (%s)\n", 
            stream->stream_id, decoder_backend_name(config.backend));
+
+    /* 如果启用了 SHM，尽早创建共享内存（在 STREAM_START 后就能让下游打开）
+     * 格式(NV12/YUV420P)可能在运行时变化(硬解/软解)，shm 采用最大 4:2:0 容量并在 publish 时写实际布局。
+     */
+    if (stream->shm_enabled && !stream->shm_opened && stream->info_received) {
+        char shm_name[128];
+        snprintf(shm_name, sizeof(shm_name), "/stream_server_stream_%02d", stream->stream_id);
+        if (shm_frame_writer_open(&stream->shm_writer, shm_name,
+                                  (uint32_t)stream->info.width, (uint32_t)stream->info.height) == 0) {
+            stream->shm_opened = true;
+            printf("[Stream %d] SHM created: %s (%ux%u)\n",
+                   stream->stream_id, shm_name, stream->info.width, stream->info.height);
+        }
+    }
     
     pthread_mutex_unlock(&stream->lock);
     return 0;
@@ -219,6 +249,12 @@ void stream_close_decoder(StreamContext* stream) {
         stream->decoder_ctx = NULL;
     }
     stream->decoder_initialized = false;
+
+    /* 关闭 SHM（可选） */
+    if (stream->shm_opened) {
+        shm_frame_writer_close(&stream->shm_writer);
+        stream->shm_opened = false;
+    }
     
     pthread_mutex_unlock(&stream->lock);
 }
@@ -264,6 +300,25 @@ int stream_decode_video(StreamContext* stream, const uint8_t* data, int size) {
             decoder_free_frame(stream->last_frame);
         }
         stream->last_frame = frame;
+
+        /* 可选：按需发布到共享内存（下游请求时才 memcpy） */
+        if (stream->shm_enabled) {
+            if (!stream->shm_opened) {
+                /* shm 名称可按 stream_id 区分 */
+                char shm_name[128];
+                snprintf(shm_name, sizeof(shm_name), "/stream_server_stream_%02d", stream->stream_id);
+
+                if (shm_frame_writer_open(&stream->shm_writer, shm_name,
+                                          (uint32_t)frame->width, (uint32_t)frame->height) == 0) {
+                    stream->shm_opened = true;
+                    printf("[Stream %d] SHM enabled: %s (%dx%d)\n",
+                           stream->stream_id, shm_name, frame->width, frame->height);
+                }
+            }
+            if (stream->shm_opened) {
+                (void)shm_frame_writer_maybe_publish(&stream->shm_writer, frame);
+            }
+        }
     } else if (ret < 0) {
         stream->decode_stats.frames_dropped++;
     }
@@ -361,8 +416,15 @@ static void* stress_decode_worker(void* arg) {
         }
         /* 取走数据 */
         local_size = st->queue_size[idx];
-        local_buf = realloc(local_buf, local_size);
-        memcpy(local_buf, st->queue_data[idx], local_size);
+        uint8_t* new_buf = realloc(local_buf, (size_t)local_size);
+        if (!new_buf) {
+            /* OOM: 丢弃当前帧，避免 local_buf 指针丢失 */
+            st->queue_ready[idx] = false;
+            pthread_mutex_unlock(&st->queue_locks[idx]);
+            continue;
+        }
+        local_buf = new_buf;
+        memcpy(local_buf, st->queue_data[idx], (size_t)local_size);
         st->queue_ready[idx] = false;
         pthread_mutex_unlock(&st->queue_locks[idx]);
 
@@ -562,9 +624,15 @@ int stream_stress_test_decode(StreamManager* mgr, uint16_t source_stream_id,
         pthread_mutex_lock(&st->queue_locks[i]);
         /* 覆盖旧数据（如果线程来不及消费则丢弃旧帧） */
         if (size > 256 * 1024) {
-            st->queue_data[i] = realloc(st->queue_data[i], size);
+            uint8_t* new_q = realloc(st->queue_data[i], (size_t)size);
+            if (!new_q) {
+                /* OOM: 丢弃该路本帧分发 */
+                pthread_mutex_unlock(&st->queue_locks[i]);
+                continue;
+            }
+            st->queue_data[i] = new_q;
         }
-        memcpy(st->queue_data[i], data, size);
+        memcpy(st->queue_data[i], data, (size_t)size);
         st->queue_size[i] = size;
         st->queue_ready[i] = true;
         pthread_cond_signal(&st->queue_conds[i]);

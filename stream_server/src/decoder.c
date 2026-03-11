@@ -164,6 +164,29 @@ static int hw_get_buffer(AVCodecContext* ctx, AVFrame* frame, int flags) {
     return av_hwframe_get_buffer(ctx->hw_frames_ctx, frame, 0);
 }
 
+/*
+ * 计算给定像素格式下各 plane 的有效高度（用于深拷贝）。
+ * 注意：frame->linesize 可能包含 padding，但“行数”必须按格式计算。
+ */
+static int plane_height_for_pix_fmt(enum AVPixelFormat fmt, int plane, int height) {
+    switch (fmt) {
+        case AV_PIX_FMT_NV12:
+            /* Y: H, UV: H/2 */
+            return (plane == 0) ? height : (plane == 1 ? height / 2 : 0);
+        case AV_PIX_FMT_YUV420P:
+            /* Y: H, U/V: H/2 */
+            return (plane == 0) ? height : ((plane == 1 || plane == 2) ? height / 2 : 0);
+        case AV_PIX_FMT_BGRA:
+        case AV_PIX_FMT_RGBA:
+        case AV_PIX_FMT_RGB24:
+            /* packed */
+            return (plane == 0) ? height : 0;
+        default:
+            /* 其它格式：保守处理，只拷贝 plane0，避免越界 */
+            return (plane == 0) ? height : 0;
+    }
+}
+
 DecoderCtx* decoder_create(const DecoderConfig* config) {
     DecoderCtx* ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -550,11 +573,16 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                 frame->av_frame = NULL;
                 for (int i = 0; i < 4; i++) {
                     if (sw_frame->data[i]) {
-                        int lines = (i < 2) ? frame->height : frame->height / 2;
+                        int lines = plane_height_for_pix_fmt((enum AVPixelFormat)sw_frame->format,
+                                                           i, frame->height);
+                        if (lines <= 0) {
+                            continue;
+                        }
                         frame->linesize[i] = sw_frame->linesize[i];
                         frame->data[i] = malloc(frame->linesize[i] * lines);
                         if (frame->data[i]) {
-                            memcpy(frame->data[i], sw_frame->data[i], frame->linesize[i] * lines);
+                            memcpy(frame->data[i], sw_frame->data[i],
+                                   (size_t)frame->linesize[i] * (size_t)lines);
                         }
                     }
                 }
@@ -682,7 +710,11 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
         /* CPU 帧：深拷贝数据 */
         for (int i = 0; i < 4; i++) {
             if (sw_frame->data[i]) {
-                int lines = (i < 2) ? frame->height : frame->height / 2;
+                int lines = plane_height_for_pix_fmt((enum AVPixelFormat)sw_frame->format,
+                                                   i, frame->height);
+                if (lines <= 0) {
+                    continue;
+                }
                 frame->linesize[i] = sw_frame->linesize[i];
                 frame->data[i] = malloc(frame->linesize[i] * lines);
                 if (frame->data[i]) {
@@ -701,15 +733,20 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
                            DecodedFrame* dst, DecodeFormat target_format) {
     if (!ctx || !src || !dst) return -1;
     
-    /* 目前仅支持 NV12 -> BGRA 转换 */
-    if (src->format != DECODE_FMT_NV12 || target_format != DECODE_FMT_BGRA) {
+    /* 允许 NV12 / YUV420P -> BGRA（CPU fallback 时通常为 YUV420P） */
+    if ((src->format != DECODE_FMT_NV12 && src->format != DECODE_FMT_YUV420P) ||
+        target_format != DECODE_FMT_BGRA) {
         return -1;
     }
+
+    enum AVPixelFormat src_pix_fmt = (src->format == DECODE_FMT_NV12)
+                                       ? AV_PIX_FMT_NV12
+                                       : AV_PIX_FMT_YUV420P;
     
     /* 初始化 SwsContext（如果未初始化） */
     if (!ctx->sws_ctx) {
         ctx->sws_ctx = sws_getContext(
-            src->width, src->height, AV_PIX_FMT_NV12,
+            src->width, src->height, src_pix_fmt,
             src->width, src->height, AV_PIX_FMT_BGRA,
             SWS_BILINEAR, NULL, NULL, NULL
         );
@@ -733,10 +770,14 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
     }
     
     /* 执行转换 */
-    const uint8_t* src_data[4] = { src->data[0], src->data[1], NULL, NULL };
+    const uint8_t* src_data[4] = { src->data[0], src->data[1], src->data[2], NULL };
     uint8_t* dst_data[4] = { dst->data[0], NULL, NULL, NULL };
     int src_linesize[4] = { src->linesize[0], src->linesize[1], 0, 0 };
     int dst_linesize[4] = { dst->linesize[0], 0, 0, 0 };
+
+    if (src->format == DECODE_FMT_YUV420P) {
+        src_linesize[2] = src->linesize[2];
+    }
     
     sws_scale(ctx->sws_ctx, src_data, src_linesize, 0, src->height,
               dst_data, dst_linesize);

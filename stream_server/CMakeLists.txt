@@ -101,6 +101,8 @@ set(SOURCES
     src/stream.c
     src/server.c
     src/decoder.c
+    src/shm_frame.c
+    src/h264_tap.c
 )
 
 # 可执行文件

@@ -1,3 +1,13 @@
+/**
+ * @file video_callbacks.c
+ * @brief ml_worker 侧视频回调：从 Moonlight embedded(Limelight) 回调获取编码后的 H.264 数据
+ *        并通过自定义 TCP 协议推送到 stream_server。
+ *
+ * 背景：
+ * - Moonlight embedded 在回调 submitDecodeUnit() 中提供“decode unit”，实际是编码后的 H.264 bytestream。
+ * - 本模块不做转码/不做解码，只做拼包、可选 IDR 识别、发送与统计。
+ */
+
 #include "video_callbacks.h"
 #include "worker_defs.h"
 
@@ -6,14 +16,15 @@
 #include <string.h>
 #include <time.h>
 
+/* renderer capability：每帧 slice 数（影响回调行为），默认 4 */
 #define SLICES_PER_FRAME 4
 
-/* TCP发送器实例 */
+/* TCP发送器实例：负责把 H.264 bytestream 按 TLV 协议推送到 stream_server */
 static TcpSender g_tcp_sender;
 static int g_tcp_initialized = 0;
 static WorkerRenderConfig* g_cfg = NULL;
 
-/* 预分配帧缓冲区（避免每帧malloc） */
+/* 预分配帧缓冲区（避免每帧 malloc）：把 decodeUnit 的链表分片拼成连续 bytestream */
 static uint8_t* g_frame_buffer = NULL;
 static size_t g_frame_buffer_size = 0;
 
@@ -207,6 +218,12 @@ static void worker_cleanup(void) {
     g_cfg = NULL;
 }
 
+/*
+ * 检测是否包含 IDR：在 AnnexB bytestream 中扫描 start code，读取 NAL header 的 type。
+ * - NAL type 5 表示 IDR
+ *
+ * 注意：这里只做轻量检测用于统计/策略。
+ */
 static int is_idr_frame(const uint8_t* data, size_t length) {
     if (length < 5) {
         return 0;
@@ -252,7 +269,11 @@ static int worker_submit_decode_unit(PDECODE_UNIT decodeUnit) {
         return DR_OK;
     }
 
-    /* 收集所有数据到连续缓冲区 */
+    /*
+     * 收集所有分片到连续缓冲区：
+     * decodeUnit->bufferList 是一个链表，每个 entry 是一段 H.264 bytestream。
+     * decodeUnit->fullLength 是总长度。
+     */
     int total_length = decodeUnit->fullLength;
     if (total_length <= 0) {
         maybe_report_stats();
@@ -273,10 +294,15 @@ static int worker_submit_decode_unit(PDECODE_UNIT decodeUnit) {
         entry = entry->next;
     }
 
+    /* 理论上 offset == fullLength；若不一致，按实际拼接长度为准，避免越界 */
+    if (offset != total_length) {
+        total_length = offset;
+    }
+
     /* 检测是否为IDR帧 */
     int is_idr = is_idr_frame(g_frame_buffer, total_length);
 
-    /* 通过TCP发送H.264裸流 */
+    /* 通过 TCP 发送 H.264 bytestream（不转码） */
     if (tcp_sender_send_video(&g_tcp_sender, g_frame_buffer, total_length, is_idr) < 0) {
         fprintf(stderr, "worker_submit_decode_unit: tcp_sender_send_video failed\n");
         set_fatal_once(WORKER_FATAL_TCP_SEND);

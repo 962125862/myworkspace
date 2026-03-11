@@ -25,6 +25,7 @@
 
 #include "protocol.h"
 #include "decoder.h"
+#include "shm_frame.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
@@ -85,6 +86,11 @@ typedef struct {
     StreamDecodeStats decode_stats;/* 解码性能统计 */
     bool decoder_initialized;      /* 解码器是否已初始化 */
     DecodedFrame* last_frame;      /* 最后解码帧 (供 YOLO 推理使用) */
+
+    /* 共享内存发布 (可选) */
+    bool shm_enabled;              /* 是否启用 SHM 发布（由 env 控制，lazy open） */
+    bool shm_opened;               /* 是否已经创建并 mmap shm */
+    ShmFrameWriter shm_writer;     /* 每路流一个 shm writer */
 
     /* 线程安全 */
     pthread_mutex_t lock;          /* 保护本结构所有字段 */

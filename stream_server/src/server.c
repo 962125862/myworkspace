@@ -8,6 +8,7 @@
 #include "protocol.h"
 #include "decoder.h"
 #include "stream.h"
+#include "h264_tap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,27 +71,31 @@ static void client_destroy(ClientConn* client) {
     free(client);
 }
 
-static int recv_exact(int fd, uint8_t* buf, size_t n, int timeout_sec) {
+/*
+ * 精确读取 n 字节。
+ * - client_fd 是阻塞 socket，并设置了 SO_RCVTIMEO
+ * - 超时时 recv() 通常返回 -1 且 errno=EAGAIN/EWOULDBLOCK
+ * - 这里不做 sleep 忙等，避免不必要的 1ms 粒度延迟和 CPU 浪费
+ */
+static int recv_exact(int fd, uint8_t* buf, size_t n) {
     size_t received = 0;
-    time_t start = time(NULL);
-    
     while (received < n) {
-        if (time(NULL) - start > timeout_sec) {
-            return -1;  /* 超时 */
-        }
-        
         ssize_t r = recv(fd, buf + received, n - received, 0);
         if (r > 0) {
-            received += r;
-        } else if (r == 0) {
-            return -1;  /* 连接关闭 */
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            return -1;  /* 错误 */
+            received += (size_t)r;
+            continue;
         }
-        
-        usleep(1000);  /* 1ms */
+        if (r == 0) {
+            return -1; /* peer closed */
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return -1; /* timeout */
+        }
+        return -1;
     }
-    
     return 0;
 }
 
@@ -99,6 +104,20 @@ static int recv_exact(int fd, uint8_t* buf, size_t n, int timeout_sec) {
 /* 压力测试模式开关（通过环境变量控制） */
 static int g_stress_test_enabled = 0;
 static int g_stress_test_copies = 20;
+
+/* H264 tap */
+static int g_h264_tap_started = 0;
+static void maybe_start_h264_tap(void) {
+    if (g_h264_tap_started) return;
+    const char* port_env = getenv("H264_TAP_PORT");
+    if (!port_env) return;
+    int port = atoi(port_env);
+    if (port <= 0 || port > 65535) return;
+    const char* bind_env = getenv("H264_TAP_BIND");
+    if (h264_tap_start(bind_env ? bind_env : "127.0.0.1", (uint16_t)port) == 0) {
+        g_h264_tap_started = 1;
+    }
+}
 
 /* 获取解码后端（支持环境变量强制指定） */
 static DecodeBackend get_decode_backend(void) {
@@ -185,6 +204,14 @@ static void handle_packet(TcpServer* server, ClientConn* client,
             /* 解码视频数据 */
             if (payload && header->length > TCP_HEADER_SIZE) {
                 uint32_t payload_len = header->length - TCP_HEADER_SIZE;
+
+                /* 可选：旁路输出 H264（不转码） */
+                if (!g_h264_tap_started) {
+                    maybe_start_h264_tap();
+                }
+                if (g_h264_tap_started) {
+                    h264_tap_publish(header->stream_id, payload, (int)payload_len);
+                }
                 
                 /* 先解码源流 */
                 int ret = stream_decode_video(stream, payload, payload_len);
@@ -249,7 +276,7 @@ static void* client_handler(void* arg) {
     while (server->running && client->fd >= 0) {
         /* 读取包头 */
         uint8_t header_buf[TCP_HEADER_SIZE];
-        if (recv_exact(client->fd, header_buf, TCP_HEADER_SIZE, RECV_TIMEOUT_SEC) < 0) {
+        if (recv_exact(client->fd, header_buf, TCP_HEADER_SIZE) < 0) {
             break;
         }
         
@@ -268,22 +295,33 @@ static void* client_handler(void* arg) {
                 fprintf(stderr, "[Server] Packet too large: %u\n", payload_len);
                 break;
             }
-            
-            payload = malloc(payload_len);
-            if (!payload) {
-                break;
+
+            /* 复用 client->recv_buf，避免每包 malloc/free */
+            if (payload_len > client->recv_buf_size) {
+                size_t new_size = client->recv_buf_size;
+                while (new_size < payload_len) {
+                    new_size *= 2;
+                    if (new_size < client->recv_buf_size) { /* overflow */
+                        new_size = payload_len;
+                        break;
+                    }
+                }
+                uint8_t* new_buf = realloc(client->recv_buf, new_size);
+                if (!new_buf) {
+                    break;
+                }
+                client->recv_buf = new_buf;
+                client->recv_buf_size = new_size;
             }
-            
-            if (recv_exact(client->fd, payload, payload_len, RECV_TIMEOUT_SEC) < 0) {
-                free(payload);
+
+            payload = client->recv_buf;
+            if (recv_exact(client->fd, payload, payload_len) < 0) {
                 break;
             }
         }
         
         /* 处理包 */
         handle_packet(server, client, &header, payload);
-        
-        free(payload);
     }
     
     printf("[Server] Client %s disconnected\n", client_ip);
@@ -358,6 +396,15 @@ static void* accept_loop(void* arg) {
         int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
         
+        /* 启动客户端处理线程（先准备参数，避免加入链表后再失败导致悬挂指针） */
+        ClientHandlerArg* arg = malloc(sizeof(*arg));
+        if (!arg) {
+            client_destroy(client);
+            continue;
+        }
+        arg->server = server;
+        arg->client = client;
+
         /* 添加到链表 */
         pthread_mutex_lock(&server->clients_lock);
         client->next = server->clients;
@@ -365,26 +412,32 @@ static void* accept_loop(void* arg) {
         server->client_count++;
         server->total_connections++;
         pthread_mutex_unlock(&server->clients_lock);
-        
+
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
         printf("[Server] New connection from %s:%d (total: %d)\n",
                client_ip, ntohs(client_addr.sin_port), server->client_count);
-        
-        /* 启动客户端处理线程 */
-        ClientHandlerArg* arg = malloc(sizeof(ClientHandlerArg));
-        if (!arg) {
-            client_destroy(client);
+
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, client_handler, arg) != 0) {
+            fprintf(stderr, "[Server] Failed to create client handler thread\n");
+            free(arg);
+
+            /* 从链表中摘除并销毁 client */
             pthread_mutex_lock(&server->clients_lock);
-            server->client_count--;
+            ClientConn** pp = &server->clients;
+            while (*pp && *pp != client) {
+                pp = &(*pp)->next;
+            }
+            if (*pp == client) {
+                *pp = client->next;
+                server->client_count--;
+            }
             pthread_mutex_unlock(&server->clients_lock);
+
+            client_destroy(client);
             continue;
         }
-        arg->server = server;
-        arg->client = client;
-        
-        pthread_t thread;
-        pthread_create(&thread, NULL, client_handler, arg);
         pthread_detach(thread);
     }
     
@@ -493,24 +546,48 @@ void server_stop(TcpServer* server) {
     }
     pthread_mutex_unlock(&server->clients_lock);
 
-    /* 等待所有 handler 线程退出并完成链表清理 */
-    usleep(500000);  /* 500ms */
+    /* 等待 handler 线程完成链表摘除 + client_destroy()
+     *
+     * 注意：handler 线程是 detach 的，无法 join。
+     * 这里采用轮询等待链表清空的方式，避免在 server_stop() 中并发 free 导致 UAF/double-free。
+     */
+    const int max_wait_ms = (RECV_TIMEOUT_SEC + 1) * 1000;
+    int waited_ms = 0;
+    while (waited_ms < max_wait_ms) {
+        pthread_mutex_lock(&server->clients_lock);
+        int empty = (server->clients == NULL);
+        int left = server->client_count;
+        pthread_mutex_unlock(&server->clients_lock);
 
-    /* 清理任何仍残留的条目 (正常路径下链表应已为空) */
-    pthread_mutex_lock(&server->clients_lock);
-    client = server->clients;
-    while (client) {
-        ClientConn* next = client->next;
-        if (client->fd >= 0) close(client->fd);
-        free(client->recv_buf);
-        free(client);
-        client = next;
+        if (empty) {
+            break;
+        }
+
+        /* 每 200ms 打印一次提示（避免刷屏） */
+        if (waited_ms % 200 == 0) {
+            fprintf(stderr, "[Server] waiting clients to exit... left=%d\n", left);
+        }
+
+        usleep(50 * 1000);
+        waited_ms += 50;
     }
-    server->clients = NULL;
-    server->client_count = 0;
+
+    pthread_mutex_lock(&server->clients_lock);
+    if (server->clients != NULL) {
+        fprintf(stderr,
+                "[Server] warning: server_stop timeout, %d client(s) still in list; "
+                "skip forced free to avoid races\n",
+                server->client_count);
+    }
     pthread_mutex_unlock(&server->clients_lock);
     
     printf("[Server] Stopped\n");
+
+    /* stop h264 tap (optional) */
+    if (g_h264_tap_started) {
+        h264_tap_stop();
+        g_h264_tap_started = 0;
+    }
 }
 
 bool server_is_running(TcpServer* server) {

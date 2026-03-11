@@ -44,6 +44,12 @@ stream_server 是一个高性能多路视频流接收与硬件解码服务器，
 | **网络层** | `server.h/c` | TCP accept/recv、客户端管理、包分发 |
 | **入口** | `main.c` | 参数解析、信号处理、统计打印主循环 |
 
+可选模块:
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| **共享内存发布** | `shm_frame.h/c` | 将最新帧(YUV: NV12/YUV420P)按需发布到 POSIX shared memory，供下游进程直接读取 |
+
 ---
 
 ## 数据流
@@ -232,6 +238,16 @@ while (parse_remaining > 0) {
 
 统计 `ctx->stats.bytes_in += size` 放在 parser 循环外部，且仅在有帧输出时计算，避免循环内重复累加。
 
+### 5. SHM 按需发布 (request/publish + seqlock)
+
+为避免下游跨线程/跨进程直接引用 `last_frame` 引发的生命周期问题，可启用共享内存发布：
+
+- Writer(stream_server) 每路流创建一个 shm: `/stream_server_stream_XX`
+- Reader(下游) 通过自增 `request_seq` 请求“下一帧”，writer 在下一次解码成功时 memcpy 并更新 `publish_seq`
+- 一致性：使用 `write_seq` seqlock（写入期间为奇数；读者发现奇数/前后不一致则重试）
+
+启用：`ENABLE_SHM=1`；若希望每帧都发布可设 `SHM_ALWAYS=1`。
+
 ---
 
 ## 目录结构
@@ -241,12 +257,14 @@ stream_server/
 ├── include/
 │   ├── protocol.h          # 协议定义
 │   ├── decoder.h           # 解码器 API
+│   ├── shm_frame.h          # 共享内存发布 API (可选)
 │   ├── stream.h            # 流管理器 API
 │   └── server.h            # TCP 服务器 API
 ├── src/
 │   ├── main.c              # 程序入口
 │   ├── protocol.c          # 协议解析 (纯函数)
 │   ├── decoder.c           # 硬件解码器实现
+│   ├── shm_frame.c          # 共享内存发布实现 (可选)
 │   ├── stream.c            # 流管理 + 压力测试线程池
 │   └── server.c            # TCP 服务器实现
 ├── tests/

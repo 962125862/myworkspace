@@ -1,3 +1,14 @@
+/**
+ * @file main.c
+ * @brief ml_worker 主程序：
+ *
+ * 功能概览：
+ * - 作为“推流端”：连接 Sunshine/NVIDIA GameStream 主机，启动指定 app 的串流
+ * - 通过 Moonlight embedded (Limelight) 的回调拿到编码后的 H.264 bytestream
+ * - 使用自定义 TLV 协议经 TCP 推送到 stream_server（接收端负责解码/共享内存发布/旁路桥接）
+ * - 可选启用控制通道：监听 UDP 控制包，将鼠标/键盘/文本事件注入到串流会话
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

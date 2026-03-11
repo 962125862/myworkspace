@@ -276,6 +276,7 @@ void tcp_sender_disconnect(TcpSender* sender) {
 }
 
 int tcp_sender_send_video(TcpSender* sender, const uint8_t* data, size_t length, int frame_type) {
+    /* frame_type 当前未进入协议编码，预留给未来扩展（例如在视频包头中携带 keyframe 标记）。 */
     (void)frame_type;
 
     if (!sender || !data || length == 0) {

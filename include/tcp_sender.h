@@ -76,7 +76,8 @@ void tcp_sender_disconnect(TcpSender* sender);
  * @param sender TCP发送器指针
  * @param data H.264数据指针
  * @param length 数据长度
- * @param frame_type 帧类型 (0=P帧, 1=IDR帧)
+ * @param frame_type 帧类型提示 (0=non-IDR, 1=IDR)
+ * @note 当前实现未使用该参数进行协议编码，仅作为调用方统计/未来扩展预留。
  * @return 0成功，-1失败
  */
 int tcp_sender_send_video(TcpSender* sender, const uint8_t* data, size_t length, int frame_type);
