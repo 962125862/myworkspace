@@ -117,3 +117,8 @@ ffplay -f rawvideo -pixel_format nv12 -video_size 1280x720 -i /tmp/frame.nv12
 
 - 可以把 `request_new=false`（只读当前已发布的最新帧，不触发 request_seq++）
 - 或为每个 stream_id 启动单独桥接进程
+
+---
+
+Doc-Version: 0.2.1
+Repo-Rev: 797c719
