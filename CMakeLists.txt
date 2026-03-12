@@ -28,3 +28,9 @@ target_link_libraries(ml_worker PRIVATE
         moonlight-common-c
         gamestream
 )
+
+# Optional: strem_agent_server (POSIX-oriented; works on Linux/WSL/MSYS2).
+option(BUILD_STREM_AGENT_SERVER "Build strem_agent_server" ON)
+if (BUILD_STREM_AGENT_SERVER)
+    add_subdirectory(strem_agent_server)
+endif()
