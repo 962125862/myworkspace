@@ -17,6 +17,9 @@ services:
   republisher:
     build:
       context: ./republisher
+      # Allow build stage to reach a proxy bound to 127.0.0.1 on the host.
+      # (Build containers normally have their own network namespace.)
+      network: host
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -40,6 +43,8 @@ services:
   ws_ctrl_bridge:
     build:
       context: ./ws_ctrl_bridge
+      # Allow build stage to reach a proxy bound to 127.0.0.1 on the host.
+      network: host
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}

@@ -49,6 +49,10 @@ PUBLIC_HOST=YOUR_PUBLIC_IP_OR_DNS \\
   docker compose up -d --build
 ```
 
+Note (Linux): if your proxy only listens on host loopback (`127.0.0.1`), build containers can't reach it unless
+the build uses host networking. This repo's `docker-compose.yml` sets `build.network: host` for the images that
+need `apt`/`npm` to make loopback proxies work.
+
 If you are in CN and want to speed up apt without relying on proxy, set an apt mirror (example):
 
 ```bash
