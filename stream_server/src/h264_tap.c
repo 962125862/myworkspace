@@ -108,6 +108,34 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+static void client_close(TapClient* c);
+
+/* If no stream data is being published, we may never call send(), so TCP close (FIN/RST)
+ * from a client can remain undetected and the slot stays occupied. Prune clients
+ * by peeking recv() in non-blocking mode.
+ * Caller must hold g_tap.lock.
+ */
+static void prune_dead_clients_locked(void) {
+    char ch;
+    for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
+        TapClient* c = &g_tap.clients[i];
+        if (!c->active || c->fd < 0) continue;
+
+        ssize_t n = recv(c->fd, &ch, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (n > 0) {
+            /* Ignore unexpected inbound data (SUB is read once at accept). */
+            continue;
+        }
+        if (n == 0) {
+            client_close(c);
+            continue;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+        client_close(c);
+    }
+}
+
 static void client_close(TapClient* c) {
     if (!c) return;
     if (c->fd >= 0) close(c->fd);
@@ -174,6 +202,7 @@ static void* accept_loop(void* arg) {
         request_idr_best_effort();
 
         pthread_mutex_lock(&g_tap.lock);
+        prune_dead_clients_locked();
         int placed = 0;
         for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
             if (!g_tap.clients[i].active) {
@@ -182,6 +211,19 @@ static void* accept_loop(void* arg) {
                 g_tap.clients[i].active = true;
                 placed = 1;
                 break;
+            }
+        }
+
+        if (!placed) {
+            prune_dead_clients_locked();
+            for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
+                if (!g_tap.clients[i].active) {
+                    g_tap.clients[i].fd = fd;
+                    g_tap.clients[i].stream_id = sid;
+                    g_tap.clients[i].active = true;
+                    placed = 1;
+                    break;
+                }
             }
         }
         pthread_mutex_unlock(&g_tap.lock);

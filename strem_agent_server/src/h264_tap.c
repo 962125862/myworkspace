@@ -285,6 +285,40 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+static void client_close(TapClient* c);
+
+/* If no video is being published, we may never call send(), so TCP close (FIN/RST)
+ * from a client can remain undetected and the slot stays occupied. Prune clients
+ * by peeking recv() in non-blocking mode.
+ * Caller must hold g_tap.lock.
+ */
+static void prune_dead_clients_locked(void) {
+    char ch;
+    for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
+        TapClient* c = &g_tap.clients[i];
+        if (!c->active || c->fd < 0) continue;
+
+        ssize_t n = recv(c->fd, &ch, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (n > 0) {
+            /* Unexpected inbound data. Ignore (we don't expect any after SUB). */
+            continue;
+        }
+        if (n == 0) {
+            /* Peer performed an orderly shutdown. */
+            client_close(c);
+            continue;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            continue; /* no data, still alive */
+        }
+        /* Treat other errors as dead. */
+        client_close(c);
+    }
+}
+
 static void client_close(TapClient* c) {
     if (!c) return;
     if (c->fd >= 0) close(c->fd);
@@ -530,6 +564,7 @@ static void* accept_loop(void* arg) {
         }
 
         pthread_mutex_lock(&g_tap.lock);
+        prune_dead_clients_locked();
         int placed = 0;
         TapClient* placed_c = NULL;
         for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
@@ -549,6 +584,26 @@ static void* accept_loop(void* arg) {
                 copy_global_param_sets_to_client(c, sid);
                 fprintf(stderr, "[agent_h264_tap] client subscribed stream_id=%u\n", (unsigned)sid);
                 break;
+            }
+        }
+
+        if (!placed) {
+            /* Retry after pruning (in case dead clients were occupying slots). */
+            prune_dead_clients_locked();
+            for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
+                if (!g_tap.clients[i].active) {
+                    TapClient* c = &g_tap.clients[i];
+                    c->fd = fd;
+                    c->stream_id = sid;
+                    c->active = true;
+                    c->need_idr = true;
+                    placed = 1;
+                    placed_c = c;
+
+                    copy_global_param_sets_to_client(c, sid);
+                    fprintf(stderr, "[agent_h264_tap] client subscribed stream_id=%u\n", (unsigned)sid);
+                    break;
+                }
             }
         }
         pthread_mutex_unlock(&g_tap.lock);
