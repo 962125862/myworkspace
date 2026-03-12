@@ -12,6 +12,7 @@ TCP_PORT="9000"
 STREAM_ID="1"
 
 # 控制端口配置
+CONTROL_BIND="127.0.0.1"
 CONTROL_PORT="50001"
 
 # 视频参数

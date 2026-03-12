@@ -127,6 +127,8 @@ write_worker_config() {
     local tcp_host="${6:-127.0.0.1}"
     local tcp_port="${7:-}"
     local stream_id="${8:-}"
+    local control_bind="${9:-127.0.0.1}"
+    local control_port="${10:-}"
 
     mkdir -p "$WORKERS_DIR" "$DATA_DIR/$name/keys"
 
@@ -147,6 +149,14 @@ write_worker_config() {
         stream_id=$((1 + 10#${idx_str:-0}))
     fi
 
+    if [[ -z "$control_port" ]]; then
+        local idx_str=""
+        if [[ "$name" =~ ([0-9]+)$ ]]; then
+            idx_str="${BASH_REMATCH[1]}"
+        fi
+        control_port=$((50001 + 10#${idx_str:-0}))
+    fi
+
     cat > "$(worker_config_path "$name")" <<EOF
 HOST="$host"
 APP="$app"
@@ -155,6 +165,8 @@ WORKER_BIN="$worker_bin"
 TCP_HOST="$tcp_host"
 TCP_PORT="$tcp_port"
 STREAM_ID="$stream_id"
+CONTROL_BIND="$control_bind"
+CONTROL_PORT="$control_port"
 EOF
 
     log "已创建 worker 配置: $(worker_config_path "$name")"
@@ -226,7 +238,16 @@ create_worker_interactive() {
     read -rp "Stream ID [1]: " stream_id
     stream_id="${stream_id:-1}"
 
-    write_worker_config "$name" "$host" "$app" "$image" "$worker_bin" "$tcp_host" "$tcp_port" "$stream_id"
+    echo
+    log "控制端口配置（用于 REQ_IDR/鼠标键盘注入，ml_worker UDP socket）"
+    local control_bind
+    read -rp "CONTROL_BIND [127.0.0.1]: " control_bind
+    control_bind="${control_bind:-127.0.0.1}"
+    local control_port
+    read -rp "CONTROL_PORT [50001]: " control_port
+    control_port="${control_port:-50001}"
+
+    write_worker_config "$name" "$host" "$app" "$image" "$worker_bin" "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port"
 
     printf '\n'
     log "创建完成:"
@@ -246,6 +267,8 @@ create_worker_noninteractive() {
     local tcp_host="${6:-127.0.0.1}"
     local tcp_port="${7:-}"
     local stream_id="${8:-}"
+    local control_bind="${9:-127.0.0.1}"
+    local control_port="${10:-}"
 
     if [[ -z "$name" || -z "$host" ]]; then
         err "create_worker_noninteractive: name/host 不能为空"
@@ -257,7 +280,7 @@ create_worker_noninteractive() {
         return 1
     fi
 
-    write_worker_config "$name" "$host" "$app" "$image" "$worker_bin" "$tcp_host" "$tcp_port" "$stream_id"
+    write_worker_config "$name" "$host" "$app" "$image" "$worker_bin" "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port"
 }
 
 ensure_worker_or_create() {
@@ -287,7 +310,7 @@ load_worker() {
         return 1
     }
 
-    unset NAME HOST APP IMAGE WORKER_BIN KEY_DIR SHM_NAME CONTROL_PORT
+    unset NAME HOST APP IMAGE WORKER_BIN KEY_DIR SHM_NAME CONTROL_BIND CONTROL_PORT
     unset WIDTH HEIGHT FPS BITRATE PACKET_SIZE COLORSPACE RANGE
     unset CONTAINER_NAME
 
@@ -315,6 +338,7 @@ load_worker() {
     KEY_DIR="${KEY_DIR:-$DATA_DIR/$NAME/keys}"
     SHM_NAME="${SHM_NAME:-/ml_stream_$suffix}"
 
+    CONTROL_BIND="${CONTROL_BIND:-127.0.0.1}"
     if [[ -z "${CONTROL_PORT:-}" ]]; then
         if [[ -n "$idx_str" ]]; then
             CONTROL_PORT=$((50001 + 10#$idx_str))
@@ -446,6 +470,7 @@ up_worker() {
         --tcp-host "$TCP_HOST"
         --tcp-port "$TCP_PORT"
         --stream-id "$STREAM_ID"
+        --control-bind "$CONTROL_BIND"
         --control-port "$CONTROL_PORT"
         --width "$WIDTH"
         --height "$HEIGHT"
@@ -468,7 +493,7 @@ up_worker() {
         "${cmd[@]}" >/dev/null
 
     log "stream 已启动: $CONTAINER_NAME"
-    log "host=$HOST app=$APP tcp=$TCP_HOST:$TCP_PORT stream_id=$STREAM_ID control_port=$CONTROL_PORT"
+    log "host=$HOST app=$APP tcp=$TCP_HOST:$TCP_PORT stream_id=$STREAM_ID control=$CONTROL_BIND:$CONTROL_PORT"
 }
 
 down_worker() {
@@ -537,7 +562,7 @@ status_worker() {
     [[ -e "$shm_file" ]] && shm_state="YES"
 
     printf '%-10s  state=%-8s  host=%-15s  app=%-18s  keys=%-3s  tcp=%s:%s  ctrl=%-5s  key_dir=%s\n' \
-        "$NAME" "$cstate" "$HOST" "$APP" "$kstate" "$TCP_HOST" "$TCP_PORT" "$CONTROL_PORT" "$KEY_DIR"
+        "$NAME" "$cstate" "$HOST" "$APP" "$kstate" "$TCP_HOST" "$TCP_PORT" "$CONTROL_BIND:$CONTROL_PORT" "$KEY_DIR"
 }
 
 status_all() {
@@ -654,7 +679,7 @@ worker_menu() {
         echo "image=$IMAGE"
         echo "key_dir=$KEY_DIR"
         echo "tcp=$TCP_HOST:$TCP_PORT (stream_id=$STREAM_ID)"
-        echo "control_port=$CONTROL_PORT"
+        echo "control=$CONTROL_BIND:$CONTROL_PORT"
         echo
         echo "1) pair"
         echo "2) pair + up"

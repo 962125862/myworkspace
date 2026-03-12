@@ -11,6 +11,7 @@ TCP_PORT="19000"
 STREAM_ID="1"
 
 # ml_worker local UDP control socket (agent_server forwards control to this)
+CONTROL_BIND="127.0.0.1"
 CONTROL_PORT="50001"
 
 # Video params
@@ -21,4 +22,3 @@ BITRATE="10000"
 PACKET_SIZE="1024"
 COLORSPACE="709"
 RANGE="limited"
-
