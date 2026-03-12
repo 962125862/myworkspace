@@ -1,0 +1,14 @@
+[Unit]
+Description=Toggle Docker daemon proxy (start=enable, stop=disable)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /home/gejun/work/my_ml_work/deploy/docker_proxy/docker_proxy.sh on
+ExecStop=/bin/bash /home/gejun/work/my_ml_work/deploy/docker_proxy/docker_proxy.sh off
+
+[Install]
+WantedBy=multi-user.target
+
