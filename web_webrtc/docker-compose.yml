@@ -17,6 +17,13 @@ services:
   republisher:
     build:
       context: ./republisher
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        # If you're in CN and don't want to rely on proxy, you can set:
+        #   APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
     network_mode: host
     environment:
       AGENT_HOST: ${AGENT_HOST:-127.0.0.1}
@@ -33,6 +40,10 @@ services:
   ws_ctrl_bridge:
     build:
       context: ./ws_ctrl_bridge
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     network_mode: host
     environment:
       LISTEN_PORT: ${CTRL_WS_PORT:-34567}

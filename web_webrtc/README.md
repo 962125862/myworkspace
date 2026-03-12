@@ -40,6 +40,23 @@ PUBLIC_HOST=YOUR_PUBLIC_IP_OR_DNS \\
   docker compose up -d --build
 ```
 
+If image builds are slow, you can pass proxy variables to the build (Compose forwards them as build args):
+
+```bash
+HTTP_PROXY=http://127.0.0.1:1095 \\
+HTTPS_PROXY=http://127.0.0.1:1095 \\
+PUBLIC_HOST=YOUR_PUBLIC_IP_OR_DNS \\
+  docker compose up -d --build
+```
+
+If you are in CN and want to speed up apt without relying on proxy, set an apt mirror (example):
+
+```bash
+APT_MIRROR=mirrors.tuna.tsinghua.edu.cn \\
+PUBLIC_HOST=YOUR_PUBLIC_IP_OR_DNS \\
+  docker compose up -d --build
+```
+
 3) Open in browser (Chrome/Edge recommended for MVP):
 
 ```text
