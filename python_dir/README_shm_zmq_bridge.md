@@ -12,7 +12,7 @@
 1) 启动 `stream_server` 时启用共享内存发布：
 
 ```bash
-ENABLE_SHM=1 ./stream_server
+./stream_server --enable-shm
 ```
 
 2) 确认对应流的共享内存对象存在：
@@ -117,4 +117,3 @@ ffplay -f rawvideo -pixel_format nv12 -video_size 1280x720 -i /tmp/frame.nv12
 
 - 可以把 `request_new=false`（只读当前已发布的最新帧，不触发 request_seq++）
 - 或为每个 stream_id 启动单独桥接进程
-

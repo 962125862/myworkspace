@@ -28,6 +28,23 @@ py -m pip install -r requirements.txt
 python strem_agent_client.py --host 192.168.11.31 --video-port 31234 --ctrl-port 31235 --stream-id 1
 ```
 
+### Mouse mapping note (important)
+
+The client window is resizable. When you resize the window, the client will automatically
+"snap" the window size back to the correct video aspect ratio (so there will be no black bars).
+Mouse coordinates are mapped from the current window size back to the decoded frame coordinate
+system before sending ABS mouse events.
+
+Optional: if you want ABS mouse reference to be a custom size (e.g. the host desktop
+resolution), set:
+
+```bash
+python strem_agent_client.py --host 192.168.11.31 --ctrl-ref-w 2560 --ctrl-ref-h 1440
+```
+
+If `--ctrl-ref-w/--ctrl-ref-h` are not set, the reference size defaults to the decoded video
+frame size (1:1).
+
 如果启用了 token：
 
 ```bash
@@ -47,6 +64,12 @@ python strem_agent_client.py --host 192.168.11.31 --token xxx
 
 ```bash
 python ide_demo_client.py
+```
+
+另一个输入演示（更偏 input 调试，带窗口比例 snap + 鼠标/键盘回传 debug overlay）：
+
+```bash
+python ide_demo_client2.py
 ```
 
 ---

@@ -191,8 +191,10 @@ cmake --build build -j
 常用：
 
 ```bash
-DECODE_BACKEND=intel ENABLE_SHM=1 \
-  ./stream_server/build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+  ./stream_server/build/stream_server \
+    -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+    --decode-backend intel \
+    --enable-shm
 ```
 
 参数（以 `--help` 为准）：
@@ -202,13 +204,26 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
 - `-c/--connections`：最大连接数
 - `-s/--stats-interval`：统计打印周期
 
+可选功能参数：
+
+- `--decode-backend <auto|intel|nvidia|cpu>`：选择解码后端
+- `--enable-shm`：启用 SHM 发布（`/dev/shm/stream_server_stream_%02d`）
+- `--shm-always`：每帧都写 SHM
+- `--zmq-bridge-bind <addr>`：启用内置 ZMQ bridge（例如 `tcp://0.0.0.0:5566`）
+- `--stress-test` / `--stress-copies <n>`：压力测试
+- `--h264-tap-port <p>` / `--h264-tap-bind <ip>`：开启 H264 tap
+- `--h264-tap-stall-ms <ms>` / `--h264-tap-drop-idr <0|1>`：tap 行为调优
+- `--ml-worker-ctrl-ip <ip>` / `--ml-worker-ctrl-port <p>`：tap 新订阅者触发上游 REQ_IDR
+
 可选：开启 H264 tap + 晚加入请求 IDR：
 
 ```bash
-export H264_TAP_PORT=19090
-export H264_TAP_BIND=0.0.0.0
-export ML_WORKER_CTRL_IP=127.0.0.1
-export ML_WORKER_CTRL_PORT=50001
+./stream_server/build/stream_server \
+  -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+  --h264-tap-port 19090 \
+  --h264-tap-bind 0.0.0.0 \
+  --ml-worker-ctrl-ip 127.0.0.1 \
+  --ml-worker-ctrl-port 50001
 ```
 
 ## 4. 典型问题
@@ -223,4 +238,3 @@ export ML_WORKER_CTRL_PORT=50001
 
 Doc-Version: 0.1.0
 Repo-Rev: 90b0776
-

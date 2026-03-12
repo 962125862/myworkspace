@@ -95,10 +95,83 @@ class CtrlSender:
     def mouse_abs(self, x, y, ref_w=0, ref_h=0):
         self._send(ML_CTRL_CMD_MOUSE_ABS, x, y, ref_w, ref_h)
 
+    def mouse_button(self, action: int, button: int):
+        # a=action, b=button
+        self._send(ML_CTRL_CMD_MOUSE_BUTTON, action, button, 0, 0)
+
+    def mouse_click(self, button: int):
+        # a=button
+        self._send(ML_CTRL_CMD_MOUSE_CLICK, button, 0, 0, 0)
+
+    def mouse_scroll(self, clicks: int):
+        # a=clicks (signed char on receiver)
+        self._send(ML_CTRL_CMD_MOUSE_SCROLL, clicks, 0, 0, 0)
+
+    def mouse_hscroll(self, clicks: int):
+        self._send(ML_CTRL_CMD_MOUSE_HSCROLL, clicks, 0, 0, 0)
+
+    # ---------- keyboard ----------
+    def key_press(self, vk: int, modifiers: int = 0):
+        # a=keyCode(VK), b=modifiers
+        self._send(ML_CTRL_CMD_KEY_PRESS, vk, modifiers, 0, 0)
+
+    def text(self, s: str):
+        payload = s.encode("utf-8", errors="ignore")
+        # a = payload length
+        self._send(ML_CTRL_CMD_TEXT, len(payload), 0, 0, 0, payload=payload)
+
     def request_idr(self):
         self._send(ML_CTRL_CMD_REQ_IDR)
 
-    # Note: v1 only supports mouse move (ABS). No click/keyboard/text.
+
+def clamp_i8(v: int) -> int:
+    if v < -127:
+        return -127
+    if v > 127:
+        return 127
+    return int(v)
+
+
+def vk_from_ascii(ch: str) -> int:
+    """Best-effort mapping from ASCII char to Win32 VK code.
+
+    Limelight expects VK codes and interprets them as keys on a US English layout.
+    This mapping is not exhaustive but covers common keys.
+    """
+    if not ch:
+        return 0
+
+    c = ch
+    if "a" <= c <= "z":
+        c = c.upper()
+
+    o = ord(c)
+    if ord("A") <= o <= ord("Z"):
+        return o
+    if ord("0") <= o <= ord("9"):
+        return o
+    if c == " ":
+        return 0x20  # VK_SPACE
+    if c == "\t":
+        return 0x09  # VK_TAB
+    if c == "\r" or c == "\n":
+        return 0x0D  # VK_RETURN
+
+    # Common US keyboard OEM keys
+    oem = {
+        "-": 0xBD,  # VK_OEM_MINUS
+        "=": 0xBB,  # VK_OEM_PLUS
+        "[": 0xDB,  # VK_OEM_4
+        "]": 0xDD,  # VK_OEM_6
+        "\\": 0xDC,  # VK_OEM_5
+        ";": 0xBA,  # VK_OEM_1
+        "'": 0xDE,  # VK_OEM_7
+        ",": 0xBC,  # VK_OEM_COMMA
+        ".": 0xBE,  # VK_OEM_PERIOD
+        "/": 0xBF,  # VK_OEM_2
+        "`": 0xC0,  # VK_OEM_3
+    }
+    return oem.get(c, 0)
 
 
 @dataclass
@@ -314,6 +387,26 @@ def main() -> int:
     ap.add_argument("--ctrl-port", type=int, default=31235)
     ap.add_argument("--stream-id", type=int, default=1)
     ap.add_argument("--token", default="")
+    ap.add_argument(
+        "--ctrl-ref-w",
+        type=int,
+        default=0,
+        help=(
+            "Reference width for ML_CTRL_CMD_MOUSE_ABS (optional). "
+            "If set (>0), mouse coords will be mapped from decoded frame (video) size "
+            "to this reference size before sending. If unset (0), use decoded frame width."
+        ),
+    )
+    ap.add_argument(
+        "--ctrl-ref-h",
+        type=int,
+        default=0,
+        help=(
+            "Reference height for ML_CTRL_CMD_MOUSE_ABS (optional). "
+            "If set (>0), mouse coords will be mapped from decoded frame (video) size "
+            "to this reference size before sending. If unset (0), use decoded frame height."
+        ),
+    )
     args = ap.parse_args()
 
     ctrl = CtrlSender(args.host, args.ctrl_port, token=args.token)
@@ -338,17 +431,127 @@ def main() -> int:
     win = "strem_agent_client"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
+    def aspect_snap_size(win_w: int, win_h: int, img_w: int, img_h: int) -> tuple[int, int]:
+        """Snap window size to keep aspect ratio == (img_w/img_h).
+
+        OpenCV doesn't provide a native "lock aspect" window mode, so we keep the window
+        resizable but continuously snap it back to the nearest size with the correct aspect.
+
+        Returns (snap_w, snap_h).
+        """
+        if win_w <= 0 or win_h <= 0 or img_w <= 0 or img_h <= 0:
+            return img_w, img_h
+
+        # Candidate 1: keep width, adjust height
+        c1_w = win_w
+        c1_h = max(1, int(round(win_w * (img_h / float(img_w)))))
+
+        # Candidate 2: keep height, adjust width
+        c2_h = win_h
+        c2_w = max(1, int(round(win_h * (img_w / float(img_h)))))
+
+        d1 = (c1_w - win_w) * (c1_w - win_w) + (c1_h - win_h) * (c1_h - win_h)
+        d2 = (c2_w - win_w) * (c2_w - win_w) + (c2_h - win_h) * (c2_h - win_h)
+        return (c1_w, c1_h) if d1 <= d2 else (c2_w, c2_h)
+
+    # Throttle window snapping to reduce jitter while user drags the window.
+    snap_state = {"t": 0.0, "w": 0, "h": 0}
+    SNAP_MIN_INTERVAL_SEC = 0.05
+
+    def ensure_window_aspect(img_w: int, img_h: int) -> tuple[int, int]:
+        """Ensure window keeps aspect ratio, return the (target_w, target_h) used for display."""
+        try:
+            _x, _y, win_w, win_h = cv2.getWindowImageRect(win)
+        except Exception:
+            win_w, win_h = img_w, img_h
+
+        target_w, target_h = aspect_snap_size(win_w, win_h, img_w, img_h)
+
+        now = time.time()
+        need_resize = abs(target_w - win_w) >= 3 or abs(target_h - win_h) >= 3
+        if need_resize:
+            if now - float(snap_state["t"]) >= SNAP_MIN_INTERVAL_SEC:
+                # Also avoid repeating identical sizes
+                if int(target_w) != int(snap_state["w"]) or int(target_h) != int(snap_state["h"]):
+                    try:
+                        cv2.resizeWindow(win, int(target_w), int(target_h))
+                        snap_state.update({"t": now, "w": int(target_w), "h": int(target_h)})
+                    except Exception:
+                        pass
+
+        return int(target_w), int(target_h)
+
     # mouse callback
     state = {"down": False}
 
     def mouse_cb(event, x, y, flags, param):
+        with lock:
+            img = latest["img"]
+        if img is None:
+            return
+
+        img_h, img_w = img.shape[:2]
+        try:
+            _x, _y, win_w, win_h = cv2.getWindowImageRect(win)
+        except Exception:
+            win_w, win_h = img_w, img_h
+
+        snap_w, snap_h = aspect_snap_size(int(win_w), int(win_h), int(img_w), int(img_h))
+        if snap_w <= 0 or snap_h <= 0:
+            return
+
+        # Map window coords -> decoded frame coords
+        ix = float(x) * float(img_w) / float(snap_w)
+        iy = float(y) * float(img_h) / float(snap_h)
+        if ix < 0 or iy < 0 or ix >= img_w or iy >= img_h:
+            return
+
+        # Optional: map to a custom reference size (e.g. host desktop resolution)
+        ref_w = int(args.ctrl_ref_w) if int(args.ctrl_ref_w) > 0 else img_w
+        ref_h = int(args.ctrl_ref_h) if int(args.ctrl_ref_h) > 0 else img_h
+        sx = int(round(ix * ref_w / float(img_w)))
+        sy = int(round(iy * ref_h / float(img_h)))
+
         if event == cv2.EVENT_MOUSEMOVE:
-            # send abs in current window coord system; ref_w/ref_h filled by client-side image size
-            with lock:
-                img = latest["img"]
-            if img is not None:
-                h, w = img.shape[:2]
-                ctrl.mouse_abs(x, y, w, h)
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+        elif event == cv2.EVENT_LBUTTONDOWN:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_PRESS, BUTTON_LEFT)
+        elif event == cv2.EVENT_LBUTTONUP:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_RELEASE, BUTTON_LEFT)
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_PRESS, BUTTON_RIGHT)
+        elif event == cv2.EVENT_RBUTTONUP:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_RELEASE, BUTTON_RIGHT)
+        elif event == cv2.EVENT_MBUTTONDOWN:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_PRESS, BUTTON_MIDDLE)
+        elif event == cv2.EVENT_MBUTTONUP:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_RELEASE, BUTTON_MIDDLE)
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            try:
+                delta = cv2.getMouseWheelDelta(flags)
+            except Exception:
+                delta = 0
+            clicks = int(delta / 120) if delta else 0
+            if clicks == 0 and delta:
+                clicks = 1 if delta > 0 else -1
+            if clicks:
+                ctrl.mouse_scroll(clamp_i8(clicks))
+        elif event == cv2.EVENT_MOUSEHWHEEL:
+            try:
+                delta = cv2.getMouseWheelDelta(flags)
+            except Exception:
+                delta = 0
+            clicks = int(delta / 120) if delta else 0
+            if clicks == 0 and delta:
+                clicks = 1 if delta > 0 else -1
+            if clicks:
+                ctrl.mouse_hscroll(clamp_i8(clicks))
 
     cv2.setMouseCallback(win, mouse_cb)
 
@@ -357,10 +560,32 @@ def main() -> int:
         with lock:
             img = latest["img"]
         if img is not None:
-            cv2.imshow(win, img)
+            ih, iw = img.shape[:2]
+            target_w, target_h = ensure_window_aspect(iw, ih)
+            # Display exactly fills the window (no black bars), because we keep the window aspect.
+            show = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            cv2.imshow(win, show)
         k = cv2.waitKey(1) & 0xFF
         if k == 27:  # ESC
             break
+
+        # Basic keyboard integration (best-effort): send VK key press for common ASCII keys.
+        # Note: OpenCV doesn't expose key-up events, so this is "press" (down+up) behavior.
+        if k != 255:
+            if k == 8:
+                ctrl.key_press(0x08)  # VK_BACK
+            elif k == 13:
+                ctrl.key_press(0x0D)  # VK_RETURN
+            elif k == 9:
+                ctrl.key_press(0x09)  # VK_TAB
+            elif 32 <= k <= 126:
+                ch = chr(k)
+                vk = vk_from_ascii(ch)
+                if vk:
+                    ctrl.key_press(vk)
+                else:
+                    # Fallback: text input
+                    ctrl.text(ch)
         # avoid tight loop when no frames
         if img is None:
             time.sleep(0.01)

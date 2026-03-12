@@ -93,7 +93,7 @@ Docker ml_worker (192.168.11.50)
 Docker ml_worker ── TCP ──> stream_server
                               │
           STREAM_START ───────┤
-          + STRESS_TEST=1     │
+          + STRESS_TEST=1 / --stress-test  │
                               ▼
                     stream_manager_start_stress_test()
                     创建 20 个虚拟流 + 20 个解码线程
@@ -247,6 +247,56 @@ while (parse_remaining > 0) {
 - 一致性：使用 `write_seq` seqlock（写入期间为奇数；读者发现奇数/前后不一致则重试）
 
 启用：`ENABLE_SHM=1`；若希望每帧都发布可设 `SHM_ALWAYS=1`。
+
+对应 CLI：`--enable-shm`；每帧发布：`--shm-always`。
+
+---
+
+## stream_server 参数参考（CLI）
+
+`stream_server/src/main.c` 提供的参数（以 `./build/stream_server --help` 输出为准）。
+
+### 基础监听/运行模式
+
+- `-h, --host <HOST>`：监听地址（默认 `0.0.0.0`）
+- `-p, --port <PORT>`：监听端口（默认 `9000`；本仓库常用 `19000`）
+- `-c, --connections <N>`：最大连接数（上限为 `MAX_STREAMS`）
+- `-s, --stats-interval <sec>`：统计打印间隔秒数（默认 `10`；设为 `0` 关闭）
+- `-d, --daemon`：以 daemon 方式运行（Linux `daemon(3)`）
+- `-v, --verbose`：保留/预留（当前无额外输出）
+
+### 解码/SHM
+
+- `--decode-backend <auto|intel|nvidia|cpu>`：选择解码后端（默认 `auto` 自动探测）
+- `--enable-shm`：开启按 stream_id 发布 SHM（`/dev/shm/stream_server_stream_%02d`）
+- `--shm-always`：每帧都写 SHM（忽略 reader 的 `request_seq`；适合只读最新帧的消费者）
+
+### ZMQ bridge（内置，可选）
+
+- `--zmq-bridge-bind <addr>`：启用内置 ZMQ ROUTER 服务端并绑定地址，例如 `tcp://0.0.0.0:5566`
+
+### 压测
+
+- `--stress-test`：启用“压力测试模式”与统计/报告
+- `--stress-copies <n>`：压力测试复制份数（虚拟流数量/复制次数）
+
+### H264 tap（旁路输出 AnnexB H.264，TCP）
+
+- `--h264-tap-port <p>`：启用 H264 tap 监听端口（默认关闭）
+- `--h264-tap-bind <ip>`：tap 监听地址（默认 `127.0.0.1`）
+- `--h264-tap-stall-ms <ms>`：tap stall 阈值（默认 `200`）
+- `--h264-tap-drop-idr <0|1>`：tap 恢复策略（默认 `1`）
+- `--ml-worker-ctrl-ip <ip>`：可选：当 tap 有新 SUB 时向上游请求 IDR 的 UDP 控制 IP
+- `--ml-worker-ctrl-port <p>`：同上（要求 `ml_worker --control-port` 已开启）
+
+### 环境变量兼容性（Deprecated）
+
+仍兼容以下 env（详见 `deploy/ENV_REFERENCE.md`），但推荐使用同名 CLI 参数。
+
+- `DECODE_BACKEND` / `ENABLE_SHM` / `SHM_ALWAYS` / `ZMQ_BRIDGE_BIND`
+- `STRESS_TEST` / `STRESS_COPIES`
+- `H264_TAP_PORT` / `H264_TAP_BIND` / `H264_TAP_STALL_MS` / `H264_TAP_DROP_IDR`
+- `ML_WORKER_CTRL_IP` / `ML_WORKER_CTRL_PORT`
 
 ---
 

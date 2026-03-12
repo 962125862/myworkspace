@@ -34,6 +34,12 @@ CTRL_PORT = 31235
 STREAM_ID = 1
 TOKEN = ""  # 如果 server 启用了 --token，这里填同样的 token
 
+# Optional: mouse ABS reference size.
+# - If 0: use decoded video frame size (1:1)
+# - If set (e.g. 2560x1440): map mouse coords from video frame -> this reference before sending
+CTRL_REF_W = 0
+CTRL_REF_H = 0
+
 
 # =====================
 # 控制协议（复用原项目定义）
@@ -41,9 +47,21 @@ TOKEN = ""  # 如果 server 启用了 --token，这里填同样的 token
 ML_CTRL_MAGIC = 0x4D4C4354
 ML_CTRL_VERSION = 1
 ML_CTRL_CMD_MOUSE_ABS = 1
+ML_CTRL_CMD_MOUSE_BUTTON = 3
+ML_CTRL_CMD_MOUSE_CLICK = 4
+ML_CTRL_CMD_MOUSE_SCROLL = 5
+ML_CTRL_CMD_MOUSE_HSCROLL = 6
+ML_CTRL_CMD_KEY_PRESS = 8
+ML_CTRL_CMD_TEXT = 9
 ML_CTRL_CMD_REQ_IDR = 10
 
 _CMD_STRUCT = struct.Struct("<IHHiiiiQ")
+
+BUTTON_ACTION_PRESS = 0x07
+BUTTON_ACTION_RELEASE = 0x08
+BUTTON_LEFT = 0x01
+BUTTON_MIDDLE = 0x02
+BUTTON_RIGHT = 0x03
 
 
 def be32(n: int) -> bytes:
@@ -101,9 +119,66 @@ class CtrlSender:
     def mouse_abs(self, x, y, ref_w=0, ref_h=0):
         self._send(ML_CTRL_CMD_MOUSE_ABS, x, y, ref_w, ref_h)
 
+    def mouse_button(self, action: int, button: int):
+        self._send(ML_CTRL_CMD_MOUSE_BUTTON, action, button, 0, 0)
+
+    def mouse_scroll(self, clicks: int):
+        self._send(ML_CTRL_CMD_MOUSE_SCROLL, clicks, 0, 0, 0)
+
+    def mouse_hscroll(self, clicks: int):
+        self._send(ML_CTRL_CMD_MOUSE_HSCROLL, clicks, 0, 0, 0)
+
+    def key_press(self, vk: int, modifiers: int = 0):
+        self._send(ML_CTRL_CMD_KEY_PRESS, vk, modifiers, 0, 0)
+
+    def text(self, s: str):
+        payload = s.encode("utf-8", errors="ignore")
+        self._send(ML_CTRL_CMD_TEXT, len(payload), 0, 0, 0, payload=payload)
+
     def request_idr(self):
         # a/b/c/d unused
         self._send(ML_CTRL_CMD_REQ_IDR, 0, 0, 0, 0)
+
+
+def clamp_i8(v: int) -> int:
+    if v < -127:
+        return -127
+    if v > 127:
+        return 127
+    return int(v)
+
+
+def vk_from_ascii(ch: str) -> int:
+    if not ch:
+        return 0
+    c = ch
+    if "a" <= c <= "z":
+        c = c.upper()
+    o = ord(c)
+    if ord("A") <= o <= ord("Z"):
+        return o
+    if ord("0") <= o <= ord("9"):
+        return o
+    if c == " ":
+        return 0x20  # VK_SPACE
+    if c == "\t":
+        return 0x09  # VK_TAB
+    if c == "\r" or c == "\n":
+        return 0x0D  # VK_RETURN
+    oem = {
+        "-": 0xBD,
+        "=": 0xBB,
+        "[": 0xDB,
+        "]": 0xDD,
+        "\\": 0xDC,
+        ";": 0xBA,
+        "'": 0xDE,
+        ",": 0xBC,
+        ".": 0xBE,
+        "/": 0xBF,
+        "`": 0xC0,
+    }
+    return oem.get(c, 0)
 
 
 def video_recv_thread(host: str, port: int, stream_id: int, token: str, frame_cb):
@@ -292,14 +367,112 @@ def main() -> int:
     win = "strem_agent_client (IDE demo)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
+    def aspect_snap_size(win_w: int, win_h: int, img_w: int, img_h: int) -> tuple[int, int]:
+        """Snap window size to keep aspect ratio == (img_w/img_h)."""
+        if win_w <= 0 or win_h <= 0 or img_w <= 0 or img_h <= 0:
+            return img_w, img_h
+
+        # Candidate 1: keep width, adjust height
+        c1_w = win_w
+        c1_h = max(1, int(round(win_w * (img_h / float(img_w)))))
+
+        # Candidate 2: keep height, adjust width
+        c2_h = win_h
+        c2_w = max(1, int(round(win_h * (img_w / float(img_h)))))
+
+        d1 = (c1_w - win_w) * (c1_w - win_w) + (c1_h - win_h) * (c1_h - win_h)
+        d2 = (c2_w - win_w) * (c2_w - win_w) + (c2_h - win_h) * (c2_h - win_h)
+        return (c1_w, c1_h) if d1 <= d2 else (c2_w, c2_h)
+
+    snap_state = {"t": 0.0, "w": 0, "h": 0}
+    SNAP_MIN_INTERVAL_SEC = 0.05
+
+    def ensure_window_aspect(img_w: int, img_h: int) -> tuple[int, int]:
+        try:
+            _x, _y, win_w, win_h = cv2.getWindowImageRect(win)
+        except Exception:
+            win_w, win_h = img_w, img_h
+
+        target_w, target_h = aspect_snap_size(int(win_w), int(win_h), int(img_w), int(img_h))
+
+        now = time.time()
+        need_resize = abs(target_w - win_w) >= 3 or abs(target_h - win_h) >= 3
+        if need_resize:
+            if now - float(snap_state["t"]) >= SNAP_MIN_INTERVAL_SEC:
+                if int(target_w) != int(snap_state["w"]) or int(target_h) != int(snap_state["h"]):
+                    try:
+                        cv2.resizeWindow(win, int(target_w), int(target_h))
+                        snap_state.update({"t": now, "w": int(target_w), "h": int(target_h)})
+                    except Exception:
+                        pass
+
+        return int(target_w), int(target_h)
+
     def mouse_cb(event, x, y, flags, param):
-        # 只在有图像尺寸时发送 ABS
+        with lock:
+            img = latest["img"]
+        if img is None:
+            return
+
+        img_h, img_w = img.shape[:2]
+        try:
+            _x, _y, win_w, win_h = cv2.getWindowImageRect(win)
+        except Exception:
+            win_w, win_h = img_w, img_h
+        snap_w, snap_h = aspect_snap_size(int(win_w), int(win_h), int(img_w), int(img_h))
+        if snap_w <= 0 or snap_h <= 0:
+            return
+
+        ix = float(x) * float(img_w) / float(snap_w)
+        iy = float(y) * float(img_h) / float(snap_h)
+        if ix < 0 or iy < 0 or ix >= img_w or iy >= img_h:
+            return
+
+        ref_w = CTRL_REF_W if CTRL_REF_W > 0 else img_w
+        ref_h = CTRL_REF_H if CTRL_REF_H > 0 else img_h
+        sx = int(round(ix * ref_w / float(img_w)))
+        sy = int(round(iy * ref_h / float(img_h)))
+
         if event == cv2.EVENT_MOUSEMOVE:
-            with lock:
-                img = latest["img"]
-            if img is not None:
-                h, w = img.shape[:2]
-                ctrl.mouse_abs(x, y, w, h)
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+        elif event == cv2.EVENT_LBUTTONDOWN:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_PRESS, BUTTON_LEFT)
+        elif event == cv2.EVENT_LBUTTONUP:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_RELEASE, BUTTON_LEFT)
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_PRESS, BUTTON_RIGHT)
+        elif event == cv2.EVENT_RBUTTONUP:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_RELEASE, BUTTON_RIGHT)
+        elif event == cv2.EVENT_MBUTTONDOWN:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_PRESS, BUTTON_MIDDLE)
+        elif event == cv2.EVENT_MBUTTONUP:
+            ctrl.mouse_abs(sx, sy, ref_w, ref_h)
+            ctrl.mouse_button(BUTTON_ACTION_RELEASE, BUTTON_MIDDLE)
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            try:
+                delta = cv2.getMouseWheelDelta(flags)
+            except Exception:
+                delta = 0
+            clicks = int(delta / 120) if delta else 0
+            if clicks == 0 and delta:
+                clicks = 1 if delta > 0 else -1
+            if clicks:
+                ctrl.mouse_scroll(clamp_i8(clicks))
+        elif event == cv2.EVENT_MOUSEHWHEEL:
+            try:
+                delta = cv2.getMouseWheelDelta(flags)
+            except Exception:
+                delta = 0
+            clicks = int(delta / 120) if delta else 0
+            if clicks == 0 and delta:
+                clicks = 1 if delta > 0 else -1
+            if clicks:
+                ctrl.mouse_hscroll(clamp_i8(clicks))
 
     cv2.setMouseCallback(win, mouse_cb)
 
@@ -308,10 +481,27 @@ def main() -> int:
         with lock:
             img = latest["img"]
         if img is not None:
-            cv2.imshow(win, img)
+            ih, iw = img.shape[:2]
+            target_w, target_h = ensure_window_aspect(iw, ih)
+            show = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            cv2.imshow(win, show)
         k = cv2.waitKey(1) & 0xFF
         if k == 27:  # ESC
             break
+        if k != 255:
+            if k == 8:
+                ctrl.key_press(0x08)
+            elif k == 13:
+                ctrl.key_press(0x0D)
+            elif k == 9:
+                ctrl.key_press(0x09)
+            elif 32 <= k <= 126:
+                ch = chr(k)
+                vk = vk_from_ascii(ch)
+                if vk:
+                    ctrl.key_press(vk)
+                else:
+                    ctrl.text(ch)
         if img is None:
             time.sleep(0.01)
 

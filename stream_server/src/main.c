@@ -33,6 +33,20 @@ static void print_usage(const char* prog) {
     printf("  -s, --stats-interval  Stats print interval in seconds (default: 10)\n");
     printf("  -d, --daemon          Run as daemon\n");
     printf("  -v, --verbose         Verbose output\n");
+    printf("\nOptional feature flags (prefer CLI over env):\n");
+    printf("  --decode-backend <auto|intel|nvidia|cpu>\n");
+    printf("  --enable-shm          Enable SHM publishing (/dev/shm/stream_server_stream_XX)\n");
+    printf("  --shm-always          Always publish to SHM (ignore request_seq)\n");
+    printf("  --zmq-bridge-bind <addr>  Enable built-in ZMQ bridge, e.g. tcp://0.0.0.0:5566\n");
+    printf("  --stress-test         Enable stress test mode/report\n");
+    printf("  --stress-copies <n>   Stress test copies\n");
+    printf("\nH264 tap (AnnexB H264 TCP output):\n");
+    printf("  --h264-tap-port <p>   Enable H264 tap port (default off)\n");
+    printf("  --h264-tap-bind <ip>  H264 tap bind ip (default 127.0.0.1)\n");
+    printf("  --h264-tap-stall-ms <ms>  Tap stall threshold (default 200)\n");
+    printf("  --h264-tap-drop-idr <0|1> Tap recovery policy (default 1)\n");
+    printf("  --ml-worker-ctrl-ip <ip>   Optional: request upstream IDR on new tap subscriber\n");
+    printf("  --ml-worker-ctrl-port <p>  (requires ml_worker --control-port enabled)\n");
     printf("  --help                Show this help\n");
 }
 
@@ -47,6 +61,22 @@ int main(int argc, char* argv[]) {
     
     int stats_interval = 10;
     int daemon_mode = 0;
+
+    /* Optional feature flags (kept as locals, then exported to env for backward compatibility)
+     * NOTE: Internal modules still support env vars; CLI options override them.
+     */
+    char decode_backend[32] = {0};
+    int enable_shm = 0;
+    int shm_always = 0;
+    char zmq_bridge_bind[256] = {0};
+    int stress_test = 0;
+    int stress_copies = 0;
+    int h264_tap_port = 0;
+    char h264_tap_bind[64] = {0};
+    int h264_tap_stall_ms = 0;
+    int h264_tap_drop_idr = -1;
+    char ml_worker_ctrl_ip[64] = {0};
+    int ml_worker_ctrl_port = 0;
     
     /* 解析命令行参数 */
     static struct option long_options[] = {
@@ -56,6 +86,18 @@ int main(int argc, char* argv[]) {
         {"stats-interval", required_argument, 0, 's'},
         {"daemon", no_argument, 0, 'd'},
         {"verbose", no_argument, 0, 'v'},
+        {"decode-backend", required_argument, 0, 1000},
+        {"enable-shm", no_argument, 0, 1001},
+        {"shm-always", no_argument, 0, 1002},
+        {"zmq-bridge-bind", required_argument, 0, 1003},
+        {"stress-test", no_argument, 0, 1004},
+        {"stress-copies", required_argument, 0, 1005},
+        {"h264-tap-port", required_argument, 0, 1006},
+        {"h264-tap-bind", required_argument, 0, 1007},
+        {"h264-tap-stall-ms", required_argument, 0, 1008},
+        {"h264-tap-drop-idr", required_argument, 0, 1009},
+        {"ml-worker-ctrl-ip", required_argument, 0, 1010},
+        {"ml-worker-ctrl-port", required_argument, 0, 1011},
         {"help", no_argument, 0, 0},
         {0, 0, 0, 0}
     };
@@ -91,10 +133,96 @@ int main(int argc, char* argv[]) {
                     return 0;
                 }
                 break;
+
+            case 1000: /* --decode-backend */
+                strncpy(decode_backend, optarg, sizeof(decode_backend) - 1);
+                break;
+            case 1001: /* --enable-shm */
+                enable_shm = 1;
+                break;
+            case 1002: /* --shm-always */
+                shm_always = 1;
+                break;
+            case 1003: /* --zmq-bridge-bind */
+                strncpy(zmq_bridge_bind, optarg, sizeof(zmq_bridge_bind) - 1);
+                break;
+            case 1004: /* --stress-test */
+                stress_test = 1;
+                break;
+            case 1005: /* --stress-copies */
+                stress_copies = atoi(optarg);
+                if (stress_copies < 0) stress_copies = 0;
+                break;
+            case 1006: /* --h264-tap-port */
+                h264_tap_port = atoi(optarg);
+                break;
+            case 1007: /* --h264-tap-bind */
+                strncpy(h264_tap_bind, optarg, sizeof(h264_tap_bind) - 1);
+                break;
+            case 1008: /* --h264-tap-stall-ms */
+                h264_tap_stall_ms = atoi(optarg);
+                break;
+            case 1009: /* --h264-tap-drop-idr */
+                h264_tap_drop_idr = atoi(optarg) > 0 ? 1 : 0;
+                break;
+            case 1010: /* --ml-worker-ctrl-ip */
+                strncpy(ml_worker_ctrl_ip, optarg, sizeof(ml_worker_ctrl_ip) - 1);
+                break;
+            case 1011: /* --ml-worker-ctrl-port */
+                ml_worker_ctrl_port = atoi(optarg);
+                break;
             default:
                 print_usage(argv[0]);
                 return 1;
         }
+    }
+
+    /* Export optional flags to env for backward compatibility.
+     * The rest of the codebase currently reads env vars.
+     */
+    if (decode_backend[0]) {
+        setenv("DECODE_BACKEND", decode_backend, 1);
+    }
+    if (enable_shm) {
+        setenv("ENABLE_SHM", "1", 1);
+    }
+    if (shm_always) {
+        setenv("SHM_ALWAYS", "1", 1);
+    }
+    if (zmq_bridge_bind[0]) {
+        setenv("ZMQ_BRIDGE_BIND", zmq_bridge_bind, 1);
+    }
+    if (stress_test) {
+        setenv("STRESS_TEST", "1", 1);
+    }
+    if (stress_copies > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", stress_copies);
+        setenv("STRESS_COPIES", buf, 1);
+    }
+    if (h264_tap_port > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", h264_tap_port);
+        setenv("H264_TAP_PORT", buf, 1);
+    }
+    if (h264_tap_bind[0]) {
+        setenv("H264_TAP_BIND", h264_tap_bind, 1);
+    }
+    if (h264_tap_stall_ms > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", h264_tap_stall_ms);
+        setenv("H264_TAP_STALL_MS", buf, 1);
+    }
+    if (h264_tap_drop_idr != -1) {
+        setenv("H264_TAP_DROP_IDR", h264_tap_drop_idr ? "1" : "0", 1);
+    }
+    if (ml_worker_ctrl_ip[0]) {
+        setenv("ML_WORKER_CTRL_IP", ml_worker_ctrl_ip, 1);
+    }
+    if (ml_worker_ctrl_port > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", ml_worker_ctrl_port);
+        setenv("ML_WORKER_CTRL_PORT", buf, 1);
     }
     
     /* 注册信号处理 */

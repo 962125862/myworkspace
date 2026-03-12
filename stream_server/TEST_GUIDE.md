@@ -146,7 +146,7 @@ streaming started, press Ctrl+C to stop
 ```bash
 ssh 192.168.11.31
 cd ~/work/my_ml_work/stream_server
-DECODE_BACKEND=vaapi ./build/stream_server -p 19000 -c 20 -s 5
+./build/stream_server -p 19000 -c 20 -s 5 --decode-backend intel
 ```
 
 **步骤 2：在 50 上启动推流**
@@ -186,7 +186,7 @@ Stream 01 (stream_01): ACTIVE, Frames: 300, Bytes: 2.72 MB, Decoded: 299, FPS: 6
 与 3.1 相同，只改环境变量：
 ```bash
 # 31 上
-DECODE_BACKEND=nvidia ./build/stream_server -p 19000 -c 20 -s 5
+./build/stream_server -p 19000 -c 20 -s 5 --decode-backend nvidia
 ```
 
 正常输出：
@@ -202,8 +202,10 @@ Stream 01 (stream_01): ACTIVE, Frames: 300, Bytes: 2.72 MB, Decoded: 299, FPS: 6
 
 **步骤 1：在 31 上启动压力测试模式**
 ```bash
-DECODE_BACKEND=nvidia STRESS_TEST=1 STRESS_COPIES=20 \
-  ./build/stream_server -p 19000 -c 20 -s 5
+./build/stream_server -p 19000 -c 20 -s 5 \
+  --decode-backend nvidia \
+  --stress-test \
+  --stress-copies 20
 ```
 
 **步骤 2：在 50 上启动推流 (只需一路)**
@@ -231,8 +233,10 @@ ssh 192.168.11.31 'watch -n 1 nvidia-smi'
 ### 3.4 20 路压力测试 (VA-API)
 
 ```bash
-DECODE_BACKEND=vaapi STRESS_TEST=1 STRESS_COPIES=20 \
-  ./build/stream_server -p 19000 -c 20 -s 5
+./build/stream_server -p 19000 -c 20 -s 5 \
+  --decode-backend intel \
+  --stress-test \
+  --stress-copies 20
 ```
 
 **预期指标：**
@@ -258,7 +262,7 @@ cd ~/work/my_ml_work/stream_server
 ```bash
 # 后台运行 (stdbuf -oL 确保日志实时刷新)
 cd ~/work/my_ml_work/stream_server
-DECODE_BACKEND=nvidia stdbuf -oL ./build/stream_server -p 19000 -c 20 -s 5 \
+stdbuf -oL ./build/stream_server -p 19000 -c 20 -s 5 --decode-backend nvidia \
   > /tmp/stream_server.log 2>&1 &
 
 # 查看实时日志
@@ -494,7 +498,7 @@ test_backend() {
     echo "[1/4] Starting server on $REMOTE ($backend)..."
     ssh "$REMOTE" "pkill -f './build/stream_server' 2>/dev/null; true" 2>/dev/null || true
     sleep 1
-    ssh "$REMOTE" "cd $REMOTE_DIR && DECODE_BACKEND=$backend stdbuf -oL ./build/stream_server -p $PORT -c 20 -s 5 </dev/null > $log_file 2>&1 &"
+    ssh "$REMOTE" "cd $REMOTE_DIR && stdbuf -oL ./build/stream_server -p $PORT -c 20 -s 5 --decode-backend $backend </dev/null > $log_file 2>&1 &"
     sleep 2
 
     # 验证服务器启动
@@ -591,8 +595,25 @@ chmod +x test_both_backends.sh
   -d, --daemon              后台运行
   -v, --verbose             详细输出 (预留)
 
-环境变量:
-  DECODE_BACKEND=nvidia|vaapi|cpu    解码后端
-  STRESS_TEST=1                      启用压力测试
-  STRESS_COPIES=20                   虚拟流数量
+可选功能参数（CLI，推荐）：
+  --decode-backend <auto|intel|nvidia|cpu>  选择解码后端
+  --enable-shm                               启用 SHM 发布（/dev/shm/stream_server_stream_XX）
+  --shm-always                               每帧都写 SHM（忽略 request_seq）
+  --zmq-bridge-bind <addr>                   启用内置 ZMQ bridge
+  --stress-test                              启用压力测试
+  --stress-copies <n>                        虚拟流数量/复制次数
+  --h264-tap-port <p>                        启用 H264 tap
+  --h264-tap-bind <ip>                       H264 tap bind
+  --h264-tap-stall-ms <ms>                   tap stall 阈值
+  --h264-tap-drop-idr <0|1>                  tap 恢复策略
+  --ml-worker-ctrl-ip <ip>                   tap 新订阅触发上游 REQ_IDR
+  --ml-worker-ctrl-port <p>
+
+环境变量（Deprecated，仍兼容）：
+  DECODE_BACKEND=auto|intel|nvidia|cpu       解码后端
+  ENABLE_SHM=1                               启用 SHM
+  SHM_ALWAYS=1                               每帧写 SHM
+  ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566         内置 ZMQ bridge bind
+  STRESS_TEST=1                              启用压力测试
+  STRESS_COPIES=20                           虚拟流数量
 ```

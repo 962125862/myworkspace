@@ -23,8 +23,10 @@
 # 31: stream_server
 cd /home/gejun/work/my_ml_work/stream_server
 make -j
-DECODE_BACKEND=intel ENABLE_SHM=1 \
-  ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+  ./build/stream_server \
+    -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+    --decode-backend intel \
+    --enable-shm
 ```
 
 另一个 31 终端启动 bridge（推荐 pump+cache，适合多客户端）：
@@ -72,9 +74,31 @@ ls -l /home/gejun/work/my_ml_work/stream_server/build/stream_server
 
 ```bash
 cd /home/gejun/work/my_ml_work/stream_server
-DECODE_BACKEND=intel ENABLE_SHM=1 \
-  ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+  ./build/stream_server \
+    -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+    --decode-backend intel \
+    --enable-shm
 ```
+
+### 1.2.1 stream_server 全参数速查（推荐看 --help）
+
+基础参数：
+
+- `-h/--host <HOST>`：监听地址
+- `-p/--port <PORT>`：监听端口
+- `-c/--connections <N>`：最大连接数
+- `-s/--stats-interval <sec>`：统计打印周期
+- `-d/--daemon`：守护进程
+
+可选功能参数：
+
+- `--decode-backend <auto|intel|nvidia|cpu>`
+- `--enable-shm` / `--shm-always`
+- `--zmq-bridge-bind <addr>`
+- `--stress-test` / `--stress-copies <n>`
+- `--h264-tap-port <p>` / `--h264-tap-bind <ip>`
+- `--h264-tap-stall-ms <ms>` / `--h264-tap-drop-idr <0|1>`
+- `--ml-worker-ctrl-ip <ip>` / `--ml-worker-ctrl-port <p>`
 
 ### 1.3 （可选）启用内置 ZMQ bridge（并入 stream_server）
 
@@ -84,7 +108,7 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
 说明：
 
 - 该功能需要编译时检测到 `libzmq`（CMake/Makefile 都是“检测到才启用”）
-- 通过环境变量开启：`ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566`
+- 通过参数开启：`--zmq-bridge-bind tcp://0.0.0.0:5566`
 - 目前实现仅提供“取最新帧”：`GET_LATEST_NV12`（`GET_SHM_NV12` 兼容为同义）
 - 内置 bridge 采用“解码时缓存紧凑 NV12 + ZMQ 发送零拷贝”的方式：
   - 解码线程更新 per-stream latest cache
@@ -95,9 +119,11 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
 
 ```bash
 cd /home/gejun/work/my_ml_work/stream_server
-DECODE_BACKEND=intel ENABLE_SHM=1 \
-ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566 \
-  ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+  ./build/stream_server \
+    -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+    --decode-backend intel \
+    --enable-shm \
+    --zmq-bridge-bind tcp://0.0.0.0:5566
 ```
 
 检查：
@@ -126,9 +152,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/gejun/work/my_ml_work/stream_server
-Environment=ENABLE_SHM=1
-Environment=DECODE_BACKEND=intel
-ExecStart=/home/gejun/work/my_ml_work/stream_server/build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+ExecStart=/home/gejun/work/my_ml_work/stream_server/build/stream_server \
+  -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+  --decode-backend intel \
+  --enable-shm
 Restart=always
 RestartSec=1
 
@@ -368,7 +395,7 @@ python3 python_dir/shm_zmq_bridge_client.py --addr tcp://192.168.11.31:5566 --st
 
 ### 8.2 /dev/shm 没有 stream_server_stream_01
 
-- 确认 `stream_server` 启动时带 `ENABLE_SHM=1`
+- 确认 `stream_server` 启动时带 `--enable-shm`（或兼容模式下 `ENABLE_SHM=1`）
 - 确认 producer 已经开始推流到 `19000`
 - 确认 `STREAM_ID` 和你检查的 `01` 一致（例如 stream_id=2 对应 `_02`）
 

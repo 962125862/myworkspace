@@ -32,14 +32,29 @@ ls -l /home/gejun/work/my_ml_work/stream_server/build/stream_server
 
 ```bash
 cd /home/gejun/work/my_ml_work/stream_server
-DECODE_BACKEND=intel ENABLE_SHM=1 \
-  ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+  ./build/stream_server \
+    -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+    --decode-backend intel \
+    --enable-shm
 ```
 
 ### 1.2.2 H264 tap: 晚加入请求 IDR（可选）
 
 如果你启用了 `H264_TAP_PORT`（旁路输出 H264 给外部客户端），且上游 Sunshine 可能不周期性输出 IDR，
 可以让 `stream_server` 在 tap 有新订阅者连接时通过 UDP 请求 `ml_worker` 触发一次 IDR：
+
+推荐做法：使用 CLI 参数（便于 systemd/service 显式配置）：
+
+```bash
+./build/stream_server \
+  -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+  --h264-tap-port 19090 \
+  --h264-tap-bind 0.0.0.0 \
+  --ml-worker-ctrl-ip 127.0.0.1 \
+  --ml-worker-ctrl-port 50001
+```
+
+（兼容模式）如果你已有基于 env 的脚本，也仍可用：
 
 ```bash
 export H264_TAP_PORT=19090
@@ -62,6 +77,17 @@ export ML_WORKER_CTRL_PORT=50001
 - `-s/--stats-interval`：统计打印周期
 - `-d/--daemon`：守护进程
 - `-v/--verbose`：更详细日志
+
+可选功能参数：
+
+- `--decode-backend <auto|intel|nvidia|cpu>`：选择解码后端
+- `--enable-shm`：启用 SHM 发布（`/dev/shm/stream_server_stream_%02d`）
+- `--shm-always`：每帧都写 SHM（忽略 reader 的 request_seq）
+- `--zmq-bridge-bind <addr>`：启用内置 ZMQ bridge（例如 `tcp://0.0.0.0:5566`）
+- `--stress-test` / `--stress-copies <n>`：压力测试
+- `--h264-tap-port <p>` / `--h264-tap-bind <ip>`：开启 H264 tap
+- `--h264-tap-stall-ms <ms>` / `--h264-tap-drop-idr <0|1>`：tap 行为调优
+- `--ml-worker-ctrl-ip <ip>` / `--ml-worker-ctrl-port <p>`：tap 新订阅者触发上游 REQ_IDR
 
 Verify it is listening:
 
@@ -87,9 +113,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/gejun/work/my_ml_work/stream_server
-Environment=ENABLE_SHM=1
-Environment=DECODE_BACKEND=intel
-ExecStart=/home/gejun/work/my_ml_work/stream_server/build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
+ExecStart=/home/gejun/work/my_ml_work/stream_server/build/stream_server \
+  -h 0.0.0.0 -p 19000 -c 20 -s 5 \
+  --decode-backend intel \
+  --enable-shm
 Restart=always
 RestartSec=1
 
