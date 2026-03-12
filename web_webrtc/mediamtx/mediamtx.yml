@@ -11,7 +11,18 @@
 
 logLevel: info
 
+# Use only RTSP/TCP to avoid opening RTP/RTCP UDP ports.
+rtspTransports: [tcp]
+
+# Custom ports (MVP defaults):
+# - RTSP: 34568/tcp
+# - WebRTC HTTP: 34569/tcp
+# - WebRTC ICE: 34570/udp (and optional 34570/tcp if enabled)
+rtspAddress: :34568
+webrtcAddress: :34569
+webrtcLocalUDPAddress: :34570
+webrtcLocalTCPAddress: :34570
+
 paths:
   mystream:
     source: publisher
-

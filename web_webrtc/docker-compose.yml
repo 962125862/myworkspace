@@ -24,7 +24,7 @@ services:
       AGENT_TOKEN: ${AGENT_TOKEN:-}
       STREAM_ID: ${STREAM_ID:-1}
       # Publish to this RTSP URL on the same host (mediamtx uses 8554 by default).
-      MTX_RTSP_URL: ${MTX_RTSP_URL:-rtsp://127.0.0.1:8554/mystream}
+      MTX_RTSP_URL: ${MTX_RTSP_URL:-rtsp://127.0.0.1:34568/mystream}
     restart: unless-stopped
     depends_on:
       - mediamtx
@@ -35,12 +35,12 @@ services:
       context: ./ws_ctrl_bridge
     network_mode: host
     environment:
-      LISTEN_PORT: ${CTRL_WS_PORT:-8080}
+      LISTEN_PORT: ${CTRL_WS_PORT:-34567}
       AGENT_HOST: ${AGENT_HOST:-127.0.0.1}
       AGENT_CTRL_PORT: ${AGENT_CTRL_PORT:-31235}
       AGENT_TOKEN: ${AGENT_TOKEN:-}
       STREAM_NAME: ${STREAM_NAME:-mystream}
-      MTX_HTTP_PORT: ${MTX_HTTP_PORT:-8889}
+      MTX_HTTP_PORT: ${MTX_HTTP_PORT:-34569}
       CTRL_REF_W: ${CTRL_REF_W:-0}
       CTRL_REF_H: ${CTRL_REF_H:-0}
     restart: unless-stopped

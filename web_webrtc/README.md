@@ -11,10 +11,12 @@ Components
 
 Ports (public server)
 
-- `8080/tcp`: web page + WS control bridge
-- `8889/tcp`: MediaMTX WebRTC pages / WHEP
-- `8189/udp`: WebRTC ICE/DTLS-SRTP (MediaMTX)
-- `8554/tcp`: RTSP (optional; for debugging)
+Default port plan (customized):
+
+- `34567/tcp`: web page + WS control bridge
+- `34568/tcp`: RTSP ingest (republisher -> MediaMTX)
+- `34569/tcp`: MediaMTX WebRTC pages / WHEP
+- `34570/udp` (+ `34570/tcp` optional fallback): WebRTC ICE/DTLS-SRTP (MediaMTX)
 
 Quick Start
 
@@ -41,7 +43,7 @@ PUBLIC_HOST=YOUR_PUBLIC_IP_OR_DNS \\
 3) Open in browser (Chrome/Edge recommended for MVP):
 
 ```text
-http://YOUR_PUBLIC_IP_OR_DNS:8080/
+http://YOUR_PUBLIC_IP_OR_DNS:34567/
 ```
 
 Notes
@@ -53,4 +55,3 @@ Notes
 ```bash
 AGENT_TOKEN=xxx PUBLIC_HOST=... docker compose up -d --build
 ```
-
