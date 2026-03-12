@@ -56,3 +56,6 @@ deploy/image/lib/
 
 # Third party deps
 third_party/
+
+# Local build dir
+build-ninja/
