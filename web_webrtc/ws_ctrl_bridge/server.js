@@ -142,7 +142,30 @@ function serveStatic(req, res) {
   fs.createReadStream(file).pipe(res);
 }
 
-const server = http.createServer((req, res) => serveStatic(req, res));
+const server = http.createServer((req, res) => {
+  if (req && req.url) {
+    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/config.json") {
+      const body = JSON.stringify(
+        {
+          streamName: STREAM_NAME,
+          mtxHttpPort: MTX_HTTP_PORT,
+          ctrlRefW: CTRL_REF_W,
+          ctrlRefH: CTRL_REF_H
+        },
+        null,
+        2
+      );
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store"
+      });
+      res.end(body);
+      return;
+    }
+  }
+  serveStatic(req, res);
+});
 
 const wss = new WebSocketServer({ server, path: "/ws" });
 
@@ -286,4 +309,3 @@ wss.on("connection", (ws) => {
 });
 
 server.listen(LISTEN_PORT);
-

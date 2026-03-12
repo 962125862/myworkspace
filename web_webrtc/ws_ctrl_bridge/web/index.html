@@ -133,16 +133,26 @@
       </main>
     </div>
     <script>
-      // Defaults: same host, different ports.
-      const host = window.location.hostname;
-      const ctrlPort = window.location.port || "8080";
-      const ctrlWsUrl = `ws://${host}:${ctrlPort}/ws`;
-      const streamName = new URLSearchParams(location.search).get("stream") || "mystream";
-      const mtxHttpPort = "8889";
-      const playerUrl = `http://${host}:${mtxHttpPort}/${streamName}?controls=0&muted=1`;
+      async function loadConfig() {
+        try {
+          const r = await fetch("/config.json", { cache: "no-store" });
+          return await r.json();
+        } catch (e) {
+          return { streamName: "mystream", mtxHttpPort: 8889 };
+        }
+      }
 
-      document.getElementById("player").src = playerUrl;
-      document.getElementById("vurl").textContent = playerUrl;
+      const host = window.location.hostname;
+      const ctrlWsUrl = `ws://${window.location.host}/ws`;
+
+      loadConfig().then((cfg) => {
+        const streamName = new URLSearchParams(location.search).get("stream") || cfg.streamName || "mystream";
+        const mtxHttpPort = cfg.mtxHttpPort || 8889;
+        const playerUrl = `http://${host}:${mtxHttpPort}/${streamName}?controls=0&muted=1`;
+        document.getElementById("player").src = playerUrl;
+        document.getElementById("vurl").textContent = playerUrl;
+      });
+
       document.getElementById("wurl").textContent = ctrlWsUrl;
 
       const wsState = document.getElementById("wsState");
