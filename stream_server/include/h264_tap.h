@@ -44,6 +44,11 @@ void h264_tap_stop(void);
  */
 void h264_tap_publish(uint16_t stream_id, const uint8_t* data, int size);
 
+/* Optional: configure upstream ml_worker UDP control endpoint.
+ * If set, stream_server will request an IDR when a new tap subscriber connects.
+ */
+void h264_tap_set_worker_ctrl(const char* ip, uint16_t port);
+
 #ifdef __cplusplus
 }
 #endif

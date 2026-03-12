@@ -19,6 +19,11 @@ void h264_tap_stop(void);
  */
 void h264_tap_set_token(const char* token);
 
+/* Configure ml_worker UDP control endpoint (agent_server will use it to
+ * request an IDR frame when a new video subscriber joins).
+ */
+void h264_tap_set_worker_ctrl(const char* ip, uint16_t port);
+
 void h264_tap_publish(uint16_t stream_id, const uint8_t* data, int size);
 
 #ifdef __cplusplus

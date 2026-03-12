@@ -12,6 +12,21 @@
 - agent control in（给 client）：`31235/tcp`
 - worker control（ml_worker 监听）：`50001/udp`（仅 server 侧到 worker 侧，不跨公网）
 
+## Late-join（晚加入）与 IDR
+
+Sunshine 在某些设置/场景下可能不会周期性发送 IDR（关键帧）。如果客户端在推流开始较久后才连接，可能出现：
+
+- 一直黑屏/无可解码帧
+- PyAV 报 `Invalid data found when processing input`
+
+为改善晚加入体验，本 repo 增加了 **REQ_IDR（请求关键帧）** 机制：
+
+- `ml_worker` 新增控制命令：`ML_CTRL_CMD_REQ_IDR = 10`，收到后调用 `LiRequestIdrFrame()` 请求主机尽快发送 IDR。
+- `strem_agent_server`：当有新的 video 订阅者（SUB）连接成功时，会自动向 `ml_worker` 的 UDP 控制端口发送一次 REQ_IDR。
+- `strem_agent_client`：连接 ctrl 后也会主动发送一次 REQ_IDR（兜底）。
+
+这意味着：即使只连接 video 端口（31234），server 也会尽力触发主机补一个 IDR，使晚加入能在几秒内起播。
+
 ## 1) Server 部署（Linux/31）
 
 ### 1.1 编译
@@ -76,6 +91,12 @@ python strem_agent_client/strem_agent_client.py \
   --host <server_ip> --video-port 31234 --ctrl-port 31235 --stream-id 1
 ```
 
+IDE 方式（Windows 直接点 Run，配置写死在文件顶部）：
+
+```bash
+python strem_agent_client/ide_demo_client.py
+```
+
 启用 token：
 
 ```bash
@@ -118,6 +139,14 @@ cp -v deploy/workers/worker_local_agent.conf.example deploy/workers/worker_local
 ./deploy/mlctl.sh logs worker_local_agent
 ```
 
+如果你修改了 `ml_worker` 源码（例如 REQ_IDR），需要重新构建镜像：
+
+```bash
+cmake --build build -j
+./deploy/build_image.sh
+./deploy/mlctl.sh restart worker_local_agent
+```
+
 ### 5.3 headless 拉一帧保存 PNG（无窗口）
 
 ```bash
@@ -136,3 +165,8 @@ ls -l /tmp/agent_frame.png
 python3 stream_server/tests/mock_h264_tap_client.py --host <server_ip> --port 31234 --stream 1 --out /tmp/agent_out.h264
 ffplay -fflags nobuffer -flags low_delay -f h264 -i /tmp/agent_out.h264
 ```
+
+---
+
+Doc-Version: 0.2.0
+Repo-Rev: 4e07aa7

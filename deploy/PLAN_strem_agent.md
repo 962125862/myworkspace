@@ -21,6 +21,16 @@ ml_worker  -- TCP(TLV/H264) -->  strem_agent_server  -- TCP(AnnexB H264) -->  st
 - 输出协议：裸 AnnexB H264 bytestream；客户端连接后可选发送 `SUB <stream_id>\n`，默认 stream_id=1。
 - 服务端采用“追最新丢旧”策略，避免 TCP 堆积导致延迟无限增长。
 
+### Late-join: REQ_IDR（请求关键帧）
+
+在某些 Sunshine 场景下，推流过程中 IDR（关键帧）可能不周期性出现，导致客户端晚加入时无法起播。
+
+解决：引入 `REQ_IDR` 控制命令（`ML_CTRL_CMD_REQ_IDR = 10`）：
+
+- `ml_worker`：收到 REQ_IDR 后调用 `LiRequestIdrFrame()` 请求主机尽快发送 IDR。
+- `strem_agent_server`：在 video SUB 成功后自动向 `ml_worker` UDP 控制端口发送一次 REQ_IDR。
+- `strem_agent_client`：连接 ctrl 后也会发送一次 REQ_IDR（兜底）。
+
 ### 控制面（必须 TCP）
 
 ```
@@ -61,3 +71,7 @@ AUTH <token>\n
 2. `strem_agent_client/`：Python 实现（H264 解码展示 + 键鼠采集 + control TCP 上行 + token）
 3. `deploy/RUNBOOK_strem_agent.md`：部署与公网用法（含 ssh -L 推荐）
 
+---
+
+Doc-Version: 0.2.0
+Repo-Rev: 4e07aa7

@@ -106,6 +106,14 @@ static int dispatch_cmd(const MlControlCmd* cmd,
             }
             return LiSendUtf8TextEvent((const char*)payload, (unsigned int)payload_len);
 
+        case ML_CTRL_CMD_REQ_IDR:
+            /* Best-effort: ask host to send an IDR soon.
+             * Note: this doesn't guarantee the next frame is IDR.
+             */
+            fprintf(stderr, "[ctrl] REQ_IDR received -> LiRequestIdrFrame()\n");
+            LiRequestIdrFrame();
+            return 0;
+
         default:
             fprintf(stderr, "[ctrl] unknown cmd type=%u\n", cmd->type);
             return -1;

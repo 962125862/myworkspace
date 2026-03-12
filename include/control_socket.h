@@ -15,6 +15,8 @@
 #define ML_CTRL_CMD_KEYBOARD       7u
 #define ML_CTRL_CMD_KEY_PRESS      8u
 #define ML_CTRL_CMD_TEXT           9u
+/* Request encoder refresh / keyframe (IDR). */
+#define ML_CTRL_CMD_REQ_IDR       10u
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;

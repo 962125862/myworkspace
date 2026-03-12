@@ -178,6 +178,10 @@ static void* ingest_thread(void* p) {
             uint32_t payload_len = hdr.length - TCP_HEADER_SIZE;
             if (payload_len > TCP_MAX_PACKET_SIZE) break;
 
+            /* Keep ingest loop quiet by default. If you need debug logs, add your
+             * own prints here or temporarily enable verbose mode.
+             */
+
             uint8_t* payload = NULL;
             if (payload_len > 0) {
                 payload = (uint8_t*)malloc(payload_len);
@@ -188,6 +192,8 @@ static void* ingest_thread(void* p) {
                     break;
                 }
             }
+
+            (void)payload;
 
             if (hdr.type == TCP_MSG_TYPE_VIDEO_DATA && payload && payload_len > 0) {
                 h264_tap_publish(hdr.stream_id, payload, (int)payload_len);
@@ -218,6 +224,7 @@ int main(int argc, char** argv) {
 
     /* token applies to both video and ctrl tcp */
     h264_tap_set_token(cfg.token);
+    h264_tap_set_worker_ctrl(cfg.worker_ctrl_ip, cfg.worker_ctrl_port);
 
     pthread_t th_ingest;
     pthread_t th_ctrl;

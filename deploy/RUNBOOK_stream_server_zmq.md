@@ -388,3 +388,8 @@ ps -C python -o pid,%cpu,%mem,rss,etime,cmd | head
 journalctl --user -u stream_server_19000.service -n 100 --no-pager
 journalctl --user -u shm_zmq_bridge_5566.service -n 100 --no-pager
 ```
+
+---
+
+Doc-Version: 0.2.0
+Repo-Rev: 4e07aa7

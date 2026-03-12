@@ -36,6 +36,33 @@ DECODE_BACKEND=intel ENABLE_SHM=1 \
   ./build/stream_server -h 0.0.0.0 -p 19000 -c 20 -s 5
 ```
 
+### 1.2.2 H264 tap: 晚加入请求 IDR（可选）
+
+如果你启用了 `H264_TAP_PORT`（旁路输出 H264 给外部客户端），且上游 Sunshine 可能不周期性输出 IDR，
+可以让 `stream_server` 在 tap 有新订阅者连接时通过 UDP 请求 `ml_worker` 触发一次 IDR：
+
+```bash
+export H264_TAP_PORT=19090
+export H264_TAP_BIND=0.0.0.0
+
+# 让 tap 在新订阅时向 ml_worker UDP 控制端口发送 REQ_IDR (type=10)
+export ML_WORKER_CTRL_IP=127.0.0.1
+export ML_WORKER_CTRL_PORT=50001
+```
+
+注意：这要求 `ml_worker` 已启用 `--control-port 50001`，并且为包含 REQ_IDR 的新版本（需要重新 build image）。
+
+### 1.2.1 stream_server 参数速查
+
+可用参数（以 `--help` 输出为准）：
+
+- `-h/--host`：监听地址（默认 `0.0.0.0`）
+- `-p/--port`：监听端口（默认 `9000`；本项目常用 `19000`）
+- `-c/--connections`：最大连接数
+- `-s/--stats-interval`：统计打印周期
+- `-d/--daemon`：守护进程
+- `-v/--verbose`：更详细日志
+
 Verify it is listening:
 
 ```bash
@@ -96,6 +123,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./deploy/build_image.sh
 ```
+
+注：如果你改动了 `ml_worker` 源码（例如新增控制命令/REQ_IDR），必须重新执行上述 build + build_image。
 
 ### 2.3 Start streaming
 
@@ -222,3 +251,7 @@ Ensure 192.168.11.31 allows inbound TCP on port `5566`.
 - Start bridge with `--pump-streams 1,2,3` to cache multiple streams.
 - Consumers should use the cached endpoint (client defaults to it) so multiple clients do not race on SHM `request_seq`.
 
+---
+
+Doc-Version: 0.2.0
+Repo-Rev: 4e07aa7

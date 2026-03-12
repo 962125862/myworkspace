@@ -25,9 +25,44 @@
 #include <time.h>
 
 #include "tlv_protocol.h" /* MAX_STREAMS */
+#include "mlctl_cmd.h"
+
+/* agent_server -> ml_worker udp control (for request IDR) */
+extern int udp_send_to(const char* ip, uint16_t port, const uint8_t* data, size_t len);
 
 /* token for AUTH on video connections */
 static char g_video_token[256] = {0};
+
+static inline uint64_t monotonic_ns(void);
+
+static char g_worker_ctrl_ip[64] = {0};
+static uint16_t g_worker_ctrl_port = 0;
+
+void h264_tap_set_worker_ctrl(const char* ip, uint16_t port) {
+    if (!ip || ip[0] == '\0' || port == 0) {
+        g_worker_ctrl_ip[0] = '\0';
+        g_worker_ctrl_port = 0;
+        return;
+    }
+    snprintf(g_worker_ctrl_ip, sizeof(g_worker_ctrl_ip), "%s", ip);
+    g_worker_ctrl_port = port;
+}
+
+static void request_idr_best_effort(void) {
+    if (g_worker_ctrl_ip[0] == '\0' || g_worker_ctrl_port == 0) {
+        return;
+    }
+    /* Send MlControlCmd to ml_worker UDP control socket.
+     * Use type=10 (ML_CTRL_CMD_REQ_IDR) which ml_worker handles by LiRequestIdrFrame().
+     */
+    MlControlCmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.magic = ML_CTRL_MAGIC;
+    cmd.version = (uint16_t)ML_CTRL_VERSION;
+    cmd.type = (uint16_t)10; /* ML_CTRL_CMD_REQ_IDR */
+    cmd.seq = (uint64_t)monotonic_ns();
+    (void)udp_send_to(g_worker_ctrl_ip, g_worker_ctrl_port, (const uint8_t*)&cmd, sizeof(cmd));
+}
 
 static inline uint64_t monotonic_ns(void) {
     struct timespec ts;
@@ -168,16 +203,81 @@ typedef struct {
     size_t pps_len;
 } TapClient;
 
+/* forward decls */
+static void ensure_out_buf(TapClient* c, size_t need);
+static bool flush_out_buf(TapClient* c);
+static bool has_start_code(const uint8_t* p, int n);
+
 static struct {
     int listen_fd;
     bool running;
     pthread_t accept_thread;
     pthread_mutex_t lock;
     TapClient clients[TAP_MAX_CLIENTS];
+
+    /* Latest parameter sets seen for each stream (AnnexB NAL including start code).
+     * Used to bootstrap late-joining clients.
+     */
+    uint8_t* sps[MAX_STREAMS + 1];
+    size_t sps_len[MAX_STREAMS + 1];
+    uint8_t* pps[MAX_STREAMS + 1];
+    size_t pps_len[MAX_STREAMS + 1];
 } g_tap;
 
 static int g_stall_ms = 200;
 static int g_drop_to_idr = 1;
+
+/* Cache SPS/PPS NALs for late joiners.
+ * Best-effort: only caches packets where the *first* NAL is SPS/PPS.
+ */
+static void update_global_param_sets(uint16_t stream_id, const uint8_t* data, int size) {
+    if (!data || size <= 0) return;
+    if (stream_id < 1 || stream_id > MAX_STREAMS) return;
+
+    if (!has_start_code(data, size)) {
+        return;
+    }
+    int nal_type = -1;
+    if (size >= 5 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
+        nal_type = data[4] & 0x1F;
+    } else if (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
+        nal_type = data[3] & 0x1F;
+    }
+    if (nal_type != 7 && nal_type != 8) {
+        return;
+    }
+
+    uint8_t** dst = (nal_type == 7) ? &g_tap.sps[stream_id] : &g_tap.pps[stream_id];
+    size_t* dst_len = (nal_type == 7) ? &g_tap.sps_len[stream_id] : &g_tap.pps_len[stream_id];
+
+    uint8_t* tmp = realloc(*dst, (size_t)size);
+    if (!tmp) return;
+    memcpy(tmp, data, (size_t)size);
+    *dst = tmp;
+    *dst_len = (size_t)size;
+}
+
+static void copy_global_param_sets_to_client(TapClient* c, uint16_t stream_id) {
+    if (!c) return;
+    if (stream_id < 1 || stream_id > MAX_STREAMS) return;
+
+    if (g_tap.sps[stream_id] && g_tap.sps_len[stream_id]) {
+        uint8_t* tmp = realloc(c->sps, g_tap.sps_len[stream_id]);
+        if (tmp) {
+            memcpy(tmp, g_tap.sps[stream_id], g_tap.sps_len[stream_id]);
+            c->sps = tmp;
+            c->sps_len = g_tap.sps_len[stream_id];
+        }
+    }
+    if (g_tap.pps[stream_id] && g_tap.pps_len[stream_id]) {
+        uint8_t* tmp = realloc(c->pps, g_tap.pps_len[stream_id]);
+        if (tmp) {
+            memcpy(tmp, g_tap.pps[stream_id], g_tap.pps_len[stream_id]);
+            c->pps = tmp;
+            c->pps_len = g_tap.pps_len[stream_id];
+        }
+    }
+}
 
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -318,11 +418,13 @@ static bool flush_out_buf(TapClient* c) {
 void h264_tap_publish(uint16_t stream_id, const uint8_t* data, int size) {
     if (!g_tap.running || !data || size <= 0) return;
 
+    bool is_idr = annexb_contains_nal_type(data, size, 5);
     static const uint8_t sc4[4] = {0, 0, 0, 1};
     bool need_sc = !has_start_code(data, size);
-    bool is_idr = annexb_contains_nal_type(data, size, 5);
 
     pthread_mutex_lock(&g_tap.lock);
+    /* Update global SPS/PPS cache under lock (shared with accept loop). */
+    update_global_param_sets(stream_id, data, size);
     for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
         TapClient* c = &g_tap.clients[i];
         if (!c->active) continue;
@@ -429,18 +531,32 @@ static void* accept_loop(void* arg) {
 
         pthread_mutex_lock(&g_tap.lock);
         int placed = 0;
+        TapClient* placed_c = NULL;
         for (int i = 0; i < TAP_MAX_CLIENTS; i++) {
             if (!g_tap.clients[i].active) {
                 TapClient* c = &g_tap.clients[i];
                 c->fd = fd;
                 c->stream_id = sid;
                 c->active = true;
+                /* Late join: wait for an IDR frame for clean decoder start.
+                 * We will also actively request an IDR from the upstream host.
+                 */
                 c->need_idr = true;
                 placed = 1;
+                placed_c = c;
+
+                /* Bootstrap param sets for late joiners (best-effort). */
+                copy_global_param_sets_to_client(c, sid);
+                fprintf(stderr, "[agent_h264_tap] client subscribed stream_id=%u\n", (unsigned)sid);
                 break;
             }
         }
         pthread_mutex_unlock(&g_tap.lock);
+
+        /* Ask upstream to send an IDR soon (do it outside the lock). */
+        if (placed && placed_c) {
+            request_idr_best_effort();
+        }
 
         if (!placed) {
             close(fd);

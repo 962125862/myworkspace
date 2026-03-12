@@ -114,6 +114,20 @@ static void maybe_start_h264_tap(void) {
     int port = atoi(port_env);
     if (port <= 0 || port > 65535) return;
     const char* bind_env = getenv("H264_TAP_BIND");
+
+    /* Optional: allow tap to request IDR from upstream ml_worker on new subscriber.
+     * This is useful when upstream doesn't emit periodic IDRs (late-join black screen).
+     * Configure the ml_worker UDP control endpoint via env vars.
+     */
+    const char* wip = getenv("ML_WORKER_CTRL_IP");
+    const char* wport = getenv("ML_WORKER_CTRL_PORT");
+    if (wip && wport) {
+        int p2 = atoi(wport);
+        if (p2 > 0 && p2 <= 65535) {
+            h264_tap_set_worker_ctrl(wip, (uint16_t)p2);
+        }
+    }
+
     if (h264_tap_start(bind_env ? bind_env : "127.0.0.1", (uint16_t)port) == 0) {
         g_h264_tap_started = 1;
     }

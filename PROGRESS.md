@@ -8,6 +8,8 @@
     → 192.168.11.31 stream_server (TCP接收 + 硬件解码)
 ```
 
+注：如果你使用 `strem_agent_server/strem_agent_client` 做远程代理（视频 + 控制），请参考 `deploy/RUNBOOK_strem_agent.md`。
+
 - Docker/脚本控制: `deploy/mlctl.sh`, worker配置在 `deploy/workers/worker00.conf`
 - 推流目标: `TCP_HOST=192.168.11.31`, `TCP_PORT=19000`
 - 流参数: 1280x720@60fps, H.264, 10Mbps
@@ -84,3 +86,8 @@ while (avcodec_receive_frame(ctx->codec_ctx, ctx->frame) == 0) {
 1. 先用 `DECODE_BACKEND=vaapi` 跑实时流, 确认 VA-API 是否真的 60fps
 2. 根据对比结果修复 CUDA 30fps 问题
 3. `stream_receiver_decode.c` 编译错误需要修复(协议结构体不匹配)
+
+---
+
+Doc-Version: 0.1.1
+Repo-Rev: 4e07aa7

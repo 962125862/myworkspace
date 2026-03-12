@@ -21,6 +21,50 @@
 #include <unistd.h>
 #include <time.h>
 
+/* best-effort: reuse ml_worker control protocol header */
+#include "mlctl_cmd.h"
+
+static inline uint64_t monotonic_ns(void);
+
+static char g_worker_ctrl_ip[64] = {0};
+static uint16_t g_worker_ctrl_port = 0;
+
+void h264_tap_set_worker_ctrl(const char* ip, uint16_t port) {
+    if (!ip || ip[0] == '\0' || port == 0) {
+        g_worker_ctrl_ip[0] = '\0';
+        g_worker_ctrl_port = 0;
+        return;
+    }
+    snprintf(g_worker_ctrl_ip, sizeof(g_worker_ctrl_ip), "%s", ip);
+    g_worker_ctrl_port = port;
+}
+
+static void request_idr_best_effort(void) {
+    if (g_worker_ctrl_ip[0] == '\0' || g_worker_ctrl_port == 0) {
+        return;
+    }
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(g_worker_ctrl_port);
+    if (inet_pton(AF_INET, g_worker_ctrl_ip, &a.sin_addr) != 1) {
+        close(fd);
+        return;
+    }
+
+    MlControlCmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.magic = ML_CTRL_MAGIC;
+    cmd.version = (uint16_t)ML_CTRL_VERSION;
+    cmd.type = (uint16_t)10; /* ML_CTRL_CMD_REQ_IDR */
+    cmd.seq = monotonic_ns();
+
+    (void)sendto(fd, &cmd, sizeof(cmd), 0, (struct sockaddr*)&a, sizeof(a));
+    close(fd);
+}
+
 /* 简化实现：最多支持少量订阅者（调试用途）。 */
 #define TAP_MAX_CLIENTS 8
 
@@ -125,6 +169,9 @@ static void* accept_loop(void* arg) {
         set_nonblocking(fd);
 
         uint16_t sid = read_subscribe_stream_id(fd);
+
+        /* Late join: request an IDR from upstream if control endpoint is configured. */
+        request_idr_best_effort();
 
         pthread_mutex_lock(&g_tap.lock);
         int placed = 0;
