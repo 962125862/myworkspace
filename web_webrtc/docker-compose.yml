@@ -1,0 +1,48 @@
+services:
+  # WebRTC / RTSP gateway.
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    network_mode: host
+    environment:
+      # IMPORTANT: set this to the public IP or DNS of the server so ICE candidates are reachable.
+      # Example:
+      #   PUBLIC_HOST=1.2.3.4 docker compose up -d
+      MTX_WEBRTCADDITIONALHOSTS: ${PUBLIC_HOST:-}
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    command: ["/mediamtx.yml"]
+    restart: unless-stopped
+
+  # Pull H264 (AnnexB) from strem_agent_server video port and publish it to MediaMTX (RTSP).
+  republisher:
+    build:
+      context: ./republisher
+    network_mode: host
+    environment:
+      AGENT_HOST: ${AGENT_HOST:-127.0.0.1}
+      AGENT_VIDEO_PORT: ${AGENT_VIDEO_PORT:-31234}
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+      STREAM_ID: ${STREAM_ID:-1}
+      # Publish to this RTSP URL on the same host (mediamtx uses 8554 by default).
+      MTX_RTSP_URL: ${MTX_RTSP_URL:-rtsp://127.0.0.1:8554/mystream}
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+
+  # WebSocket -> strem_agent_server ctrl TCP bridge.
+  ws_ctrl_bridge:
+    build:
+      context: ./ws_ctrl_bridge
+    network_mode: host
+    environment:
+      LISTEN_PORT: ${CTRL_WS_PORT:-8080}
+      AGENT_HOST: ${AGENT_HOST:-127.0.0.1}
+      AGENT_CTRL_PORT: ${AGENT_CTRL_PORT:-31235}
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+      STREAM_NAME: ${STREAM_NAME:-mystream}
+      MTX_HTTP_PORT: ${MTX_HTTP_PORT:-8889}
+      CTRL_REF_W: ${CTRL_REF_W:-0}
+      CTRL_REF_H: ${CTRL_REF_H:-0}
+    restart: unless-stopped
+    depends_on:
+      - mediamtx

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebRTC Remote (MVP)</title>
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --panel: #10151b;
+        --text: #e9eef5;
+        --muted: #96a2b3;
+        --accent: #39d98a;
+        --danger: #ff5c7a;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      }
+      .wrap {
+        height: 100%;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+      header {
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent);
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      header .title {
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      header .pill {
+        font-size: 12px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: var(--muted);
+      }
+      header .pill.ok {
+        border-color: rgba(57, 217, 138, 0.35);
+        color: rgba(57, 217, 138, 0.95);
+      }
+      header .pill.bad {
+        border-color: rgba(255, 92, 122, 0.35);
+        color: rgba(255, 92, 122, 0.95);
+      }
+      header .spacer {
+        flex: 1;
+      }
+      header button {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 6px 10px;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      header button:hover {
+        border-color: rgba(255, 255, 255, 0.28);
+      }
+      main {
+        position: relative;
+        overflow: hidden;
+      }
+      .stage {
+        position: absolute;
+        inset: 12px;
+        border-radius: 14px;
+        background: var(--panel);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        overflow: hidden;
+      }
+      iframe {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      /* Overlay captures input, but doesn't need to access the iframe content (different port origin). */
+      .overlay {
+        position: absolute;
+        inset: 0;
+        cursor: crosshair;
+      }
+      .hint {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        font-size: 12px;
+        color: var(--muted);
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        padding: 8px 10px;
+        backdrop-filter: blur(6px);
+        max-width: 70ch;
+      }
+      .hint code {
+        color: rgba(57, 217, 138, 0.95);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="title">Web Remote (MVP)</div>
+        <div id="wsState" class="pill bad">ctrl: disconnected</div>
+        <div class="pill">mouse: absolute</div>
+        <div class="spacer"></div>
+        <button id="btnIdr" title="Request IDR (keyframe)">REQ_IDR</button>
+      </header>
+      <main>
+        <div class="stage" id="stage">
+          <iframe id="player" referrerpolicy="no-referrer"></iframe>
+          <div class="overlay" id="overlay" tabindex="0"></div>
+          <div class="hint">
+            Video is served by MediaMTX at <code id="vurl"></code>.<br />
+            Input is sent over WS to <code id="wurl"></code>.<br />
+            Tip: click inside the video area first, then use keyboard.
+          </div>
+        </div>
+      </main>
+    </div>
+    <script>
+      // Defaults: same host, different ports.
+      const host = window.location.hostname;
+      const ctrlPort = window.location.port || "8080";
+      const ctrlWsUrl = `ws://${host}:${ctrlPort}/ws`;
+      const streamName = new URLSearchParams(location.search).get("stream") || "mystream";
+      const mtxHttpPort = "8889";
+      const playerUrl = `http://${host}:${mtxHttpPort}/${streamName}?controls=0&muted=1`;
+
+      document.getElementById("player").src = playerUrl;
+      document.getElementById("vurl").textContent = playerUrl;
+      document.getElementById("wurl").textContent = ctrlWsUrl;
+
+      const wsState = document.getElementById("wsState");
+      const overlay = document.getElementById("overlay");
+      const btnIdr = document.getElementById("btnIdr");
+
+      let ws = null;
+      let lastMoveTs = 0;
+      const MOVE_MIN_INTERVAL_MS = 16; // ~60Hz
+
+      function setState(ok, text) {
+        wsState.classList.toggle("ok", ok);
+        wsState.classList.toggle("bad", !ok);
+        wsState.textContent = text;
+      }
+
+      function send(obj) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify(obj));
+      }
+
+      function connect() {
+        ws = new WebSocket(ctrlWsUrl);
+        ws.onopen = () => setState(true, "ctrl: connected");
+        ws.onclose = () => {
+          setState(false, "ctrl: disconnected");
+          setTimeout(connect, 500);
+        };
+        ws.onerror = () => {
+          setState(false, "ctrl: error");
+          try {
+            ws.close();
+          } catch (_) {}
+        };
+      }
+      connect();
+
+      function overlayRect() {
+        return overlay.getBoundingClientRect();
+      }
+
+      function mapXY(ev) {
+        const r = overlayRect();
+        const x = Math.max(0, Math.min(r.width - 1, ev.clientX - r.left));
+        const y = Math.max(0, Math.min(r.height - 1, ev.clientY - r.top));
+        // Reference size (pixels) for ABS.
+        // For MVP, use overlay rect size. Server may optionally remap to host via CTRL_REF_W/H.
+        return { x: Math.round(x), y: Math.round(y), ref_w: Math.round(r.width), ref_h: Math.round(r.height) };
+      }
+
+      overlay.addEventListener("mousemove", (ev) => {
+        const now = performance.now();
+        if (now - lastMoveTs < MOVE_MIN_INTERVAL_MS) return;
+        lastMoveTs = now;
+        const p = mapXY(ev);
+        send({ t: "mouse", k: "move", ...p });
+      });
+
+      function btnName(ev) {
+        if (ev.button === 2) return "right";
+        if (ev.button === 1) return "middle";
+        return "left";
+      }
+
+      overlay.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        overlay.focus();
+        const p = mapXY(ev);
+        send({ t: "mouse", k: "move", ...p });
+        send({ t: "mouse", k: "down", b: btnName(ev) });
+      });
+
+      overlay.addEventListener("mouseup", (ev) => {
+        ev.preventDefault();
+        const p = mapXY(ev);
+        send({ t: "mouse", k: "move", ...p });
+        send({ t: "mouse", k: "up", b: btnName(ev) });
+      });
+
+      overlay.addEventListener("wheel", (ev) => {
+        ev.preventDefault();
+        send({ t: "mouse", k: "wheel", dx: ev.deltaX, dy: ev.deltaY });
+      }, { passive: false });
+
+      overlay.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
+      overlay.addEventListener("keydown", (ev) => {
+        // We only send key press (down+up) semantics on server side.
+        if (ev.key === "F5" || (ev.ctrlKey && ev.key.toLowerCase() === "r")) return; // don't fight refresh
+        ev.preventDefault();
+        send({ t: "key", k: "press", key: ev.key });
+      });
+
+      btnIdr.addEventListener("click", () => send({ t: "req_idr" }));
+    </script>
+  </body>
+</html>

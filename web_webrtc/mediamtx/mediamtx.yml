@@ -1,0 +1,17 @@
+# MediaMTX configuration for a single published path.
+# We rely on defaults for most settings.
+#
+# Ports (host network mode):
+# - RTSP: 8554/tcp
+# - WebRTC HTTP/WHEP pages: 8889/tcp
+# - WebRTC ICE: 8189/udp (and 8189/tcp fallback)
+#
+# IMPORTANT:
+# - Set env MTX_WEBRTCADDITIONALHOSTS (via PUBLIC_HOST in docker-compose) to your public IP/DNS.
+
+logLevel: info
+
+paths:
+  mystream:
+    source: publisher
+
