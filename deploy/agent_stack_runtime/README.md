@@ -9,23 +9,30 @@
 
 ## Quick Start
 
-1) 复制示例配置：
+1) 准备配置文件（第一次运行时 `./oneclick_up.sh` 也会自动创建）：
 
 ```bash
 cp -v config/strem_agent_server.env.example config/strem_agent_server.env
 cp -v config/agent_link_service.env.example config/agent_link_service.env
 ```
 
-2) 编辑两个配置文件，确保 token 一致：
+2) 编辑两个配置文件，确保 token 一致，并且不要用默认值：
 
 - `config/strem_agent_server.env`: `AGENT_TOKEN=...`
 - `config/agent_link_service.env`: `AGENT_LINK_TOKEN=...`
+- `config/agent_link_service.env`: `AGENT_LINK_SK=...`（/startLink HMAC 签名用，推荐开启；脚本默认会拒绝 `change-me-sk`）
 
 3) 启动：
 
 ```bash
 ./oneclick_up.sh
 docker compose logs -f --tail 200 agent_link_service
+```
+
+如果本机 docker socket 需要 root 权限，请用：
+
+```bash
+sudo ./oneclick_up.sh
 ```
 
 4) 第一次需要配对（可选一键脚本）：
@@ -106,9 +113,22 @@ docker exec -it agent_link_service bash -lc '/app/mlctl.sh restart worker_s1'
 
 ## startLink
 
-配对成功后，再调用：
+配对成功后，客户端侧需要先调用 `startLink`（它会按需启动对应 `stream_id` 的 `ml_worker` 容器推流）：
 
-- `POST http://127.0.0.1:40120/startLink?...`（带 HMAC 签名参数；签名规则见 `run_docker_config.md`）
+- 同机调用可用 `127.0.0.1`
+- 其他机器调用请替换成运行 stack 的机器 IP（例如 `<31_ip>`）
+
+请求参数（query）：
+
+- `stream`: stream id（例如 `1`）
+- `call_name`: 固定为 `startLink`
+- `ts`: Unix epoch seconds（例如 `date -u +%s`）
+- `nonce`: 随机字符串
+- `sig`: `HMAC_SHA256(AGENT_LINK_SK, "call_name=startLink&stream=<stream>&ts=<ts>&nonce=<nonce>")` 的 hex（小写）
+
+示例：
+
+- `POST http://<31_ip>:40120/startLink?stream=1&call_name=startLink&ts=...&nonce=...&sig=...`
 
 然后客户端连接到：
 

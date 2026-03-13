@@ -487,7 +487,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.token = token
 
         self.setWindowTitle("strem_agent_client (Qt)")
+        # Initial window size. If the stream is a different resolution, we will
+        # auto-resize once on the first decoded frame.
         self.resize(1280, 720)
+        self._did_autoresize = False
 
         self.vw = VideoWidget()
         self.setCentralWidget(self.vw)
@@ -505,10 +508,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_worker = VideoWorker(self.host, self.video_port, self.stream_id, self.token)
         self._video_worker.moveToThread(self._video_thread)
         self._video_thread.started.connect(self._video_worker.run)
-        self._video_worker.frame.connect(self.vw.set_frame)
+        self._video_worker.frame.connect(self._on_frame)
         self._video_worker.error.connect(self._on_video_error)
         self._video_thread.start()
         self._pressed_vk: set[int] = set()
+
+    def _on_frame(self, bgr: np.ndarray) -> None:
+        if not self._did_autoresize:
+            try:
+                h, w = bgr.shape[:2]
+                if w > 0 and h > 0:
+                    # Resize the *content area* (central widget) to match the frame.
+                    # QMainWindow includes window decorations (title bar/borders), so
+                    # resize(w, h) would make the drawable area smaller than the video.
+                    cw = self.centralWidget()
+                    if cw is not None and cw.width() > 0 and cw.height() > 0:
+                        dw = max(0, int(self.width() - cw.width()))
+                        dh = max(0, int(self.height() - cw.height()))
+                        self.resize(int(w + dw), int(h + dh))
+                    else:
+                        self.resize(int(w), int(h))
+                    self._did_autoresize = True
+            except Exception:
+                pass
+        self.vw.set_frame(bgr)
 
     def closeEvent(self, e) -> None:  # noqa: N802
         try:

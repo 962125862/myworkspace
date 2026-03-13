@@ -25,6 +25,9 @@ env/
 *.swp
 *.swo
 
+# Local secrets / scratch
+pat.ee
+
 # Logs and temp files
 *.log
 /tmp/

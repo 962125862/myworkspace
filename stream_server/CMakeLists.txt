@@ -20,20 +20,21 @@ pkg_check_modules(FFMPEG REQUIRED
 # 查找线程库
 find_package(Threads REQUIRED)
 
+# 检测硬件加速/可选特性支持（编译宏 + 额外链接/头文件）
+set(HWACCEL_DEFS "")
+set(HWACCEL_LIBS "")
+set(HWACCEL_INCLUDES "")
+
 # Optional: ZMQ (builtin bridge)
 pkg_check_modules(ZMQ QUIET libzmq)
 if(ZMQ_FOUND)
     message(STATUS "libzmq found - builtin ZMQ bridge enabled")
     list(APPEND HWACCEL_DEFS HAVE_ZMQ)
-    include_directories(${ZMQ_INCLUDE_DIRS})
+    list(APPEND HWACCEL_LIBS ${ZMQ_LIBRARIES})
+    list(APPEND HWACCEL_INCLUDES ${ZMQ_INCLUDE_DIRS})
 else()
     message(STATUS "libzmq not found - builtin ZMQ bridge disabled")
 endif()
-
-# 检测硬件加速支持
-set(HWACCEL_DEFS "")
-set(HWACCEL_LIBS "")
-set(HWACCEL_INCLUDES "")
 
 # 检测 CUDA Toolkit 头文件路径 (hwcontext_cuda.h 需要 cuda.h)
 set(CUDA_SEARCH_PATHS
@@ -127,7 +128,6 @@ target_link_libraries(stream_server
     Threads::Threads
     ${FFMPEG_LIBRARIES}
     ${HWACCEL_LIBS}
-    ${ZMQ_LIBRARIES}
     m  # math library
 )
 

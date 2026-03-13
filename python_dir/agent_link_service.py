@@ -296,6 +296,7 @@ class CtrlGateHandler(socketserver.BaseRequestHandler):
         assert isinstance(s, socket.socket)
 
         stream_id = 0
+        upstream: socket.socket | None = None
         try:
             # Ctrl handshake:
             #   AUTH <token>\n
@@ -340,11 +341,18 @@ class CtrlGateHandler(socketserver.BaseRequestHandler):
             upstream.sendall(f"SUB {stream_id}\n".encode("utf-8"))
 
             # Bi-directional proxy (ctrl is client->server heavy).
-            upstream.settimeout(10.0)
-            s.settimeout(10.0)
+            #
+            # Important: if the client disconnects, we must also close the upstream
+            # socket; otherwise the upstream->client pump can sit in recv() timeouts
+            # forever and keep the client socket stuck in CLOSE-WAIT, preventing
+            # idle-stop from triggering.
+            upstream.settimeout(1.0)
+            s.settimeout(1.0)
+
+            stop = threading.Event()
 
             def pump(src: socket.socket, dst: socket.socket) -> None:
-                while True:
+                while not stop.is_set():
                     try:
                         b = src.recv(64 * 1024)
                     except socket.timeout:
@@ -357,6 +365,16 @@ class CtrlGateHandler(socketserver.BaseRequestHandler):
                         dst.sendall(b)
                     except Exception:
                         break
+                stop.set()
+                # Best-effort to wake the other thread promptly.
+                try:
+                    src.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    dst.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
 
             t1 = threading.Thread(target=pump, args=(s, upstream), daemon=True)
             t2 = threading.Thread(target=pump, args=(upstream, s), daemon=True)
@@ -367,6 +385,15 @@ class CtrlGateHandler(socketserver.BaseRequestHandler):
         except Exception:
             return
         finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
             if stream_id > 0:
                 st.ondemand.on_ctrl_disconnect(stream_id)
 
