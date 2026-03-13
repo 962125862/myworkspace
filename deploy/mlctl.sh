@@ -132,7 +132,10 @@ write_worker_config() {
 
     mkdir -p "$WORKERS_DIR" "$DATA_DIR/$name/keys"
 
-    # 如果没有指定，自动分配 TCP 端口和 stream_id
+    # If not specified, auto-assign TCP port / stream_id / control_port.
+    # Convention:
+    # - worker_sN -> STREAM_ID=N, CONTROL_PORT=50000+N (so stream 1 -> 50001)
+    # - other names that end with digits keep the old behavior (idx-based)
     if [[ -z "$tcp_port" ]]; then
         local idx_str=""
         if [[ "$name" =~ ([0-9]+)$ ]]; then
@@ -142,19 +145,28 @@ write_worker_config() {
     fi
 
     if [[ -z "$stream_id" ]]; then
-        local idx_str=""
-        if [[ "$name" =~ ([0-9]+)$ ]]; then
-            idx_str="${BASH_REMATCH[1]}"
+        if [[ "$name" =~ ^worker_s([0-9]+)$ ]]; then
+            stream_id=$((10#${BASH_REMATCH[1]}))
+        else
+            local idx_str=""
+            if [[ "$name" =~ ([0-9]+)$ ]]; then
+                idx_str="${BASH_REMATCH[1]}"
+            fi
+            stream_id=$((1 + 10#${idx_str:-0}))
         fi
-        stream_id=$((1 + 10#${idx_str:-0}))
     fi
 
     if [[ -z "$control_port" ]]; then
-        local idx_str=""
-        if [[ "$name" =~ ([0-9]+)$ ]]; then
-            idx_str="${BASH_REMATCH[1]}"
+        if [[ "$name" =~ ^worker_s[0-9]+$ ]]; then
+            # Use STREAM_ID so the mapping stays stable even if naming changes.
+            control_port=$((50000 + 10#${stream_id}))
+        else
+            local idx_str=""
+            if [[ "$name" =~ ([0-9]+)$ ]]; then
+                idx_str="${BASH_REMATCH[1]}"
+            fi
+            control_port=$((50001 + 10#${idx_str:-0}))
         fi
-        control_port=$((50001 + 10#${idx_str:-0}))
     fi
 
     cat > "$(worker_config_path "$name")" <<EOF
@@ -358,13 +370,16 @@ load_worker() {
     fi
     STREAM_ID="${STREAM_ID:-$((1 + 10#${idx_str:-0}))}"
 
-    WIDTH="${WIDTH:-1280}"
-    HEIGHT="${HEIGHT:-720}"
-    FPS="${FPS:-60}"
-    BITRATE="${BITRATE:-10000}"
-    PACKET_SIZE="${PACKET_SIZE:-1024}"
-    COLORSPACE="${COLORSPACE:-709}"
-    RANGE="${RANGE:-limited}"
+    # Video params can be configured per-worker in the worker config file.
+    # For one-click/stack usage, allow container env to provide global defaults
+    # (applies only when the worker config doesn't specify a value).
+    WIDTH="${WIDTH:-${ML_WORKER_DEFAULT_WIDTH:-1280}}"
+    HEIGHT="${HEIGHT:-${ML_WORKER_DEFAULT_HEIGHT:-720}}"
+    FPS="${FPS:-${ML_WORKER_DEFAULT_FPS:-60}}"
+    BITRATE="${BITRATE:-${ML_WORKER_DEFAULT_BITRATE:-10000}}"
+    PACKET_SIZE="${PACKET_SIZE:-${ML_WORKER_DEFAULT_PACKET_SIZE:-1024}}"
+    COLORSPACE="${COLORSPACE:-${ML_WORKER_DEFAULT_COLORSPACE:-709}}"
+    RANGE="${RANGE:-${ML_WORKER_DEFAULT_RANGE:-limited}}"
 
     CONTAINER_NAME="${CONTAINER_NAME:-mlw-$NAME}"
 
@@ -388,6 +403,7 @@ current_shm_file() {
 
 pair_worker() {
     local name="$1"
+    local pin="${2:-}"
     ensure_worker_or_create "$name" || return 1
     load_worker "$name" || return 1
     ensure_dirs
@@ -402,9 +418,20 @@ pair_worker() {
     log "开始配对: $NAME"
     log "host=$HOST"
     log "keys=$KEY_DIR"
-    log "看到 PIN 后，请去 Sunshine 主机输入"
+    if [[ -n "$pin" ]]; then
+        if [[ ! "$pin" =~ ^[0-9]{4}$ ]]; then
+            err "pin 必须是 4 位数字，例如 1234"
+            return 1
+        fi
+        log "使用自定义 PIN: $pin（请去 Sunshine 主机输入同样的 PIN）"
+    else
+        log "看到 PIN 后，请去 Sunshine 主机输入"
+    fi
 
     local cmd=("${CMD_PREFIX[@]}" pair "$HOST" --key-dir /keys)
+    if [[ -n "$pin" ]]; then
+        cmd+=(--pin "$pin")
+    fi
 
     docker run --rm \
         --user "$DOCKER_USER" \
@@ -496,6 +523,35 @@ up_worker() {
     log "host=$HOST app=$APP tcp=$TCP_HOST:$TCP_PORT stream_id=$STREAM_ID control=$CONTROL_BIND:$CONTROL_PORT"
 }
 
+ensure_up_worker() {
+    local name="$1"
+    ensure_worker_or_create "$name" || return 1
+    load_worker "$name" || return 1
+    ensure_dirs
+    build_cmd_prefix
+
+    image_exists "$IMAGE" || {
+        err "镜像不存在: $IMAGE"
+        return 1
+    }
+
+    if container_running "$CONTAINER_NAME"; then
+        log "stream 已在运行: $CONTAINER_NAME"
+        return 0
+    fi
+
+    if container_exists "$CONTAINER_NAME"; then
+        docker start "$CONTAINER_NAME" >/dev/null || {
+            err "docker start 失败: $CONTAINER_NAME"
+            return 1
+        }
+        log "stream 已启动(复用容器): $CONTAINER_NAME"
+        return 0
+    fi
+
+    up_worker "$name"
+}
+
 down_worker() {
     local name="$1"
     if ! worker_exists "$name"; then
@@ -508,6 +564,32 @@ down_worker() {
     if container_exists "$CONTAINER_NAME"; then
         docker rm -f "$CONTAINER_NAME" >/dev/null
         log "已停止并删除: $CONTAINER_NAME"
+    else
+        log "容器不存在: $CONTAINER_NAME"
+    fi
+
+    local shm_file
+    shm_file="$(current_shm_file)"
+    remove_shm_file "$shm_file" || true
+}
+
+stop_soft_worker() {
+    local name="$1"
+    if ! worker_exists "$name"; then
+        err "worker 不存在: $name"
+        return 1
+    fi
+
+    load_worker "$name" || return 1
+
+    if container_running "$CONTAINER_NAME"; then
+        docker stop -t 2 "$CONTAINER_NAME" >/dev/null || {
+            err "docker stop 失败: $CONTAINER_NAME"
+            return 1
+        }
+        log "已停止(保留容器): $CONTAINER_NAME"
+    elif container_exists "$CONTAINER_NAME"; then
+        log "容器已停止: $CONTAINER_NAME"
     else
         log "容器不存在: $CONTAINER_NAME"
     fi
@@ -581,7 +663,8 @@ status_all() {
 
 pair_up_worker() {
     local name="$1"
-    if pair_worker "$name"; then
+    local pin="${2:-}"
+    if pair_worker "$name" "$pin"; then
         log "配对成功，开始启动 stream..."
         up_worker "$name"
     else
@@ -800,12 +883,14 @@ usage() {
   $0 status
   $0 status worker00
 
-  $0 pair worker00
-  $0 pair-up worker00
+  $0 pair worker00 [pin]
+  $0 pair-up worker00 [pin]
   $0 list worker00
 
   $0 up worker00
+  $0 ensure-up worker00
   $0 down worker00
+  $0 stop-soft worker00
   $0 restart worker00
   $0 logs worker00
   $0 delete worker00
@@ -815,8 +900,11 @@ usage() {
 - 如果 pair/up 时 worker 不存在，会提示你现场创建
 - add 可显式新建 worker
 - pair      : 启动一次性 pair 容器，看到 PIN 后去 Sunshine 主机输入
+-            可选指定 PIN: $0 pair worker00 1234
 - pair-up   : pair 成功后自动启动 stream
 - up/down   : 启停长期 stream 容器
+- ensure-up : 若容器已运行则不做任何事；若容器存在但已停止则 start；否则创建并启动
+- stop-soft : 只 stop 容器但不删除（下次 ensure-up 可快速 start），并清理 shm
 - logs      : 查看 stream 容器日志
 - delete    : 删除 worker 配置，并可选删除数据目录
 
@@ -870,11 +958,11 @@ main() {
             ;;
         pair)
             [[ $# -ge 2 ]] || { usage; exit 1; }
-            pair_worker "$2"
+            pair_worker "$2" "${3:-}"
             ;;
         pair-up)
             [[ $# -ge 2 ]] || { usage; exit 1; }
-            pair_up_worker "$2"
+            pair_up_worker "$2" "${3:-}"
             ;;
         list)
             [[ $# -ge 2 ]] || { usage; exit 1; }
@@ -884,9 +972,17 @@ main() {
             [[ $# -ge 2 ]] || { usage; exit 1; }
             up_worker "$2"
             ;;
+        ensure-up|ensure_up|ensure)
+            [[ $# -ge 2 ]] || { usage; exit 1; }
+            ensure_up_worker "$2"
+            ;;
         down|stop)
             [[ $# -ge 2 ]] || { usage; exit 1; }
             down_worker "$2"
+            ;;
+        stop-soft|stop_soft)
+            [[ $# -ge 2 ]] || { usage; exit 1; }
+            stop_soft_worker "$2"
             ;;
         restart)
             [[ $# -ge 2 ]] || { usage; exit 1; }

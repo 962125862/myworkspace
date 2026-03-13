@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* usleep needs XSI */
@@ -39,6 +41,49 @@ typedef struct {
 } AgentCfg;
 
 static volatile int g_running = 1;
+
+typedef struct {
+    int fd;
+    char token[256];
+    char worker_ctrl_ip[64];
+    uint16_t worker_ctrl_port;
+} CtrlClientArgs;
+
+static int ctrl_read_optional_sub(int fd, uint16_t* out_stream_id) {
+    if (!out_stream_id) return -1;
+
+    /* Optional compatibility line after AUTH:
+     *   SUB <stream_id>\n
+     * Legacy clients immediately send binary frames, which start with a 4-byte
+     * big-endian length where MSB should be 0x00 (n <= 4096). So if the next
+     * byte is 'S', we treat it as the SUB line and consume it.
+     */
+    char pfx[4] = {0};
+    ssize_t n = recv(fd, pfx, 4, MSG_PEEK);
+    if (n <= 0) return 0;
+    if (n < 4) return 0;
+    if (pfx[0] != 'S' || pfx[1] != 'U' || pfx[2] != 'B') return 0;
+
+    char line[256];
+    size_t len = 0;
+    while (len < sizeof(line) - 1) {
+        char c = 0;
+        ssize_t r = recv(fd, &c, 1, 0);
+        if (r <= 0) return -1;
+        line[len++] = c;
+        if (c == '\n') break;
+    }
+    line[len] = '\0';
+
+    int sid = 0;
+    if (sscanf(line, "SUB %d", &sid) == 1) {
+        if (sid < 1) sid = 1;
+        if (sid > 65535) sid = 65535;
+        *out_stream_id = (uint16_t)sid;
+        return 1; /* consumed */
+    }
+    return -1;
+}
 
 static void usage(const char* prog) {
     fprintf(stderr,
@@ -114,6 +159,42 @@ static int parse_args(int argc, char** argv, AgentCfg* c) {
     return 0;
 }
 
+static void* ctrl_client_thread(void* p) {
+    CtrlClientArgs* a = (CtrlClientArgs*)p;
+    int cfd = a->fd;
+
+    uint16_t sid = 1;
+    if (agent_auth_read_and_check(cfd, a->token, 3000) != 0) {
+        close(cfd);
+        free(a);
+        return NULL;
+    }
+    /* Optional SUB line (for per-stream bookkeeping on the proxy side). */
+    (void)ctrl_read_optional_sub(cfd, &sid);
+
+    /* agent_auth_read_and_check() sets SO_RCVTIMEO for the AUTH line. Clear it so
+     * idle ctrl connections don't get dropped by recv_exact() timeouts. */
+    {
+        struct timeval tv;
+        memset(&tv, 0, sizeof(tv));
+        (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
+    for (;;) {
+        uint8_t lenb[4];
+        if (recv_exact(cfd, lenb, 4) < 0) break;
+        uint32_t n = be32_read(lenb);
+        if (n == 0 || n > 4096) break;
+        uint8_t buf[4096];
+        if (recv_exact(cfd, buf, n) < 0) break;
+        (void)udp_send_to(a->worker_ctrl_ip, a->worker_ctrl_port, buf, n);
+    }
+
+    close(cfd);
+    free(a);
+    return NULL;
+}
+
 static void* ctrl_tcp_thread(void* p) {
     AgentCfg* cfg = (AgentCfg*)p;
     int lfd = tcp_listen(cfg->ctrl_bind, cfg->ctrl_port, 32);
@@ -132,20 +213,23 @@ static void* ctrl_tcp_thread(void* p) {
             nanosleep(&ts, NULL);
             continue;
         }
-        if (agent_auth_read_and_check(cfd, cfg->token, 3000) != 0) {
+        CtrlClientArgs* a = (CtrlClientArgs*)calloc(1, sizeof(*a));
+        if (!a) {
             close(cfd);
             continue;
         }
-        for (;;) {
-            uint8_t lenb[4];
-            if (recv_exact(cfd, lenb, 4) < 0) break;
-            uint32_t n = be32_read(lenb);
-            if (n == 0 || n > 4096) break;
-            uint8_t buf[4096];
-            if (recv_exact(cfd, buf, n) < 0) break;
-            (void)udp_send_to(cfg->worker_ctrl_ip, cfg->worker_ctrl_port, buf, n);
+        a->fd = cfd;
+        snprintf(a->token, sizeof(a->token), "%s", cfg->token);
+        snprintf(a->worker_ctrl_ip, sizeof(a->worker_ctrl_ip), "%s", cfg->worker_ctrl_ip);
+        a->worker_ctrl_port = cfg->worker_ctrl_port;
+
+        pthread_t th;
+        if (pthread_create(&th, NULL, ctrl_client_thread, a) != 0) {
+            close(cfd);
+            free(a);
+            continue;
         }
-        close(cfd);
+        pthread_detach(th);
     }
     close(lfd);
     return NULL;

@@ -87,6 +87,15 @@
         height: 100%;
         border: 0;
       }
+      video {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #000;
+        display: none;
+      }
       /* Overlay captures input, but doesn't need to access the iframe content (different port origin). */
       .overlay {
         position: absolute;
@@ -105,6 +114,10 @@
         padding: 8px 10px;
         backdrop-filter: blur(6px);
         max-width: 70ch;
+        display: none; /* default hidden; toggle via ?hint=1 */
+      }
+      .stage.hint-on .hint {
+        display: block;
       }
       .hint code {
         color: rgba(57, 217, 138, 0.95);
@@ -118,15 +131,18 @@
         <div id="wsState" class="pill bad">ctrl: disconnected</div>
         <div class="pill">mouse: absolute</div>
         <div class="spacer"></div>
+        <input id="token" placeholder="token" style="width: 220px" />
+        <button id="btnConn" title="Connect control websocket">CONNECT</button>
         <button id="btnIdr" title="Request IDR (keyframe)">REQ_IDR</button>
       </header>
       <main>
-        <div class="stage" id="stage">
-          <iframe id="player" referrerpolicy="no-referrer"></iframe>
-          <div class="overlay" id="overlay" tabindex="0"></div>
-          <div class="hint">
-            Video is served by MediaMTX at <code id="vurl"></code>.<br />
-            Input is sent over WS to <code id="wurl"></code>.<br />
+		        <div class="stage" id="stage">
+		          <iframe id="player" referrerpolicy="no-referrer"></iframe>
+		          <video id="player2" playsinline muted autoplay></video>
+			          <div class="overlay" id="overlay" tabindex="0"></div>
+			          <div class="hint">
+			            Video is served by MediaMTX at <code id="vurl"></code>.<br />
+			            Input is sent over WS to <code id="wurl"></code>.<br />
             Tip: click inside the video area first, then use keyboard.
           </div>
         </div>
@@ -144,24 +160,152 @@
 
       const host = window.location.hostname;
       const ctrlWsUrl = `ws://${window.location.host}/ws`;
+      const params = new URLSearchParams(location.search);
+      const playerMode = (params.get("player") || "whep").toLowerCase(); // whep | iframe
+      const streamOverride = params.get("stream") || "";
 
-      loadConfig().then((cfg) => {
-        const streamName = new URLSearchParams(location.search).get("stream") || cfg.streamName || "mystream";
-        const mtxHttpPort = cfg.mtxHttpPort || 8889;
-        const playerUrl = `http://${host}:${mtxHttpPort}/${streamName}?controls=0&muted=1`;
-        document.getElementById("player").src = playerUrl;
-        document.getElementById("vurl").textContent = playerUrl;
-      });
+      const iframe = document.getElementById("player");
+      const video = document.getElementById("player2");
+      let playerCfg = null;
+      let pc = null;
+      let videoStarting = false;
+
+      function useIframe(playerUrl) {
+        iframe.style.display = "block";
+        video.style.display = "none";
+        iframe.src = playerUrl;
+      }
+
+      async function startWhep(streamName) {
+        iframe.style.display = "none";
+        video.style.display = "block";
+        video.srcObject = null;
+
+        if (pc) {
+          try {
+            pc.close();
+          } catch (_) {}
+          pc = null;
+        }
+
+        pc = new RTCPeerConnection({
+          bundlePolicy: "max-bundle",
+          rtcpMuxPolicy: "require"
+        });
+
+        pc.addEventListener("track", (ev) => {
+          if (ev.track.kind !== "video") return;
+          video.srcObject = new MediaStream([ev.track]);
+          video.play().catch(() => null);
+        });
+
+        pc.addTransceiver("video", { direction: "recvonly" });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === "complete") return resolve();
+          const onChange = () => {
+            if (pc.iceGatheringState === "complete") {
+              pc.removeEventListener("icegatheringstatechange", onChange);
+              resolve();
+            }
+          };
+          pc.addEventListener("icegatheringstatechange", onChange);
+        });
+
+        const r = await fetch(`/whep?stream=${encodeURIComponent(streamName)}`, {
+          method: "POST",
+          headers: { "content-type": "application/sdp" },
+          body: pc.localDescription.sdp
+        });
+        if (!r.ok) throw new Error(`whep failed: ${r.status}`);
+        const answerSdp = await r.text();
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+        for (const t of pc.getTransceivers()) {
+          if (t.receiver && "playoutDelayHint" in t.receiver) {
+            try {
+              t.receiver.playoutDelayHint = 0;
+            } catch (_) {}
+          }
+        }
+
+        window.addEventListener(
+          "beforeunload",
+          () => {
+            try {
+              pc.close();
+            } catch (_) {}
+          },
+          { once: true }
+        );
+      }
+
+      async function startVideo() {
+        if (videoStarting) return;
+        videoStarting = true;
+        try {
+          if (!playerCfg) playerCfg = await loadConfig();
+          const streamName = streamOverride || playerCfg.streamName || "mystream";
+          const mtxHttpPort = playerCfg.mtxHttpPort || 8889;
+          const playerUrl = `http://${host}:${mtxHttpPort}/${streamName}?controls=0&muted=1`;
+          document.getElementById("vurl").textContent = playerMode === "iframe" ? playerUrl : `/whep?stream=${streamName}`;
+
+          if (playerMode === "iframe") {
+            useIframe(playerUrl);
+            return;
+          }
+
+          // On-demand: if the stream isn't ready yet, WHEP can fail; retry a few times before falling back.
+          let lastErr = null;
+          for (let i = 0; i < 12; i++) {
+            try {
+              await startWhep(streamName);
+              return;
+            } catch (e) {
+              lastErr = e;
+              await new Promise((r) => setTimeout(r, 800));
+            }
+          }
+          // Fallback (keeps UX usable if WHEP fails in some browsers).
+          console.warn("WHEP failed, fallback to iframe:", lastErr);
+          useIframe(playerUrl);
+        } finally {
+          videoStarting = false;
+        }
+      }
+
+      // If token gating is enabled, do not start video until control auth succeeds.
+      // This avoids "no token, click CONNECT, host flashes" behavior in on-demand setups.
+      loadConfig()
+        .then((cfg) => {
+          if (cfg && cfg.tokenRequired) return;
+          startVideo().catch(() => null);
+        })
+        .catch(() => startVideo().catch(() => null));
 
       document.getElementById("wurl").textContent = ctrlWsUrl;
 
       const wsState = document.getElementById("wsState");
+      const stage = document.getElementById("stage");
       const overlay = document.getElementById("overlay");
+      const tokenEl = document.getElementById("token");
+      const btnConn = document.getElementById("btnConn");
       const btnIdr = document.getElementById("btnIdr");
 
+	      // Default hide hint; enable via ?hint=1.
+	      stage.classList.toggle("hint-on", (new URLSearchParams(location.search).get("hint") || "0") === "1");
+
       let ws = null;
-      let lastMoveTs = 0;
-      const MOVE_MIN_INTERVAL_MS = 16; // ~60Hz
+      let authed = false;
+      // Mouse move send strategy:
+      // - Coalesce pointer/mouse moves and send at most once per animation frame.
+      // - If the websocket send buffer is backing up, drop intermediate moves.
+      let pendingMove = null;
+      let moveRaf = 0;
+      const MAX_BUFFERED_BYTES = 64 * 1024;
 
       function setState(ok, text) {
         wsState.classList.toggle("ok", ok);
@@ -170,16 +314,61 @@
       }
 
       function send(obj) {
+        // Do not send control events until authenticated.
+        if (!authed) return;
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        // If the TCP/WebSocket send buffer is backed up, avoid queueing more input.
+        if (ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
         ws.send(JSON.stringify(obj));
       }
 
+      function queueMove(ev) {
+        if (!authed) return;
+        pendingMove = mapXY(ev);
+        if (moveRaf) return;
+        moveRaf = requestAnimationFrame(() => {
+          moveRaf = 0;
+          if (!pendingMove) return;
+          const p = pendingMove;
+          pendingMove = null;
+          send({ t: "mouse", k: "move", ...p });
+        });
+      }
+
       function connect() {
-        ws = new WebSocket(ctrlWsUrl);
-        ws.onopen = () => setState(true, "ctrl: connected");
+        authed = false;
+        const tok = (tokenEl.value || "").trim();
+        const url = tok ? `${ctrlWsUrl}?token=${encodeURIComponent(tok)}` : ctrlWsUrl;
+        ws = new WebSocket(url);
+
+        ws.onopen = () => setState(false, "ctrl: connected (auth...)");
+        ws.onmessage = (ev) => {
+          let msg;
+          try {
+            msg = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          if (msg && msg.t === "auth") {
+            if (msg.ok) {
+              authed = true;
+              try {
+                localStorage.setItem("mlw_token", tok);
+              } catch (_) {}
+              setState(true, "ctrl: authed");
+              // On-demand mode: start video only after control is authenticated.
+              // (If video is already playing, this is harmless.)
+              try {
+                startVideo();
+              } catch (_) {}
+            } else {
+              setState(false, `ctrl: auth failed (${msg.error || "err"})`);
+            }
+          }
+        };
         ws.onclose = () => {
+          authed = false;
           setState(false, "ctrl: disconnected");
-          setTimeout(connect, 500);
         };
         ws.onerror = () => {
           setState(false, "ctrl: error");
@@ -188,7 +377,18 @@
           } catch (_) {}
         };
       }
-      connect();
+
+      function loadSavedToken() {
+        const fromUrl = (new URLSearchParams(location.search).get("token") || "").trim();
+        if (fromUrl) return fromUrl;
+        try {
+          return (localStorage.getItem("mlw_token") || "").trim();
+        } catch (_) {
+          return "";
+        }
+      }
+      tokenEl.value = loadSavedToken();
+      btnConn.addEventListener("click", () => connect());
 
       function overlayRect() {
         return overlay.getBoundingClientRect();
@@ -203,13 +403,9 @@
         return { x: Math.round(x), y: Math.round(y), ref_w: Math.round(r.width), ref_h: Math.round(r.height) };
       }
 
-      overlay.addEventListener("mousemove", (ev) => {
-        const now = performance.now();
-        if (now - lastMoveTs < MOVE_MIN_INTERVAL_MS) return;
-        lastMoveTs = now;
-        const p = mapXY(ev);
-        send({ t: "mouse", k: "move", ...p });
-      });
+      // Prefer pointer events (better on touchpads, supports capture), fallback to mousemove.
+      overlay.addEventListener("pointermove", queueMove);
+      overlay.addEventListener("mousemove", queueMove);
 
       function btnName(ev) {
         if (ev.button === 2) return "right";
@@ -221,6 +417,7 @@
         ev.preventDefault();
         overlay.focus();
         const p = mapXY(ev);
+        pendingMove = null;
         send({ t: "mouse", k: "move", ...p });
         send({ t: "mouse", k: "down", b: btnName(ev) });
       });
@@ -241,9 +438,19 @@
 
       overlay.addEventListener("keydown", (ev) => {
         // We only send key press (down+up) semantics on server side.
-        if (ev.key === "F5" || (ev.ctrlKey && ev.key.toLowerCase() === "r")) return; // don't fight refresh
+        // Don't fight refresh shortcuts.
+        if (ev.key === "F5" || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "r")) return;
         ev.preventDefault();
-        send({ t: "key", k: "press", key: ev.key });
+        const MOD_SHIFT = 0x01;
+        const MOD_CTRL = 0x02;
+        const MOD_ALT = 0x04;
+        const MOD_META = 0x08;
+        const modifiers =
+          (ev.shiftKey ? MOD_SHIFT : 0) |
+          (ev.ctrlKey ? MOD_CTRL : 0) |
+          (ev.altKey ? MOD_ALT : 0) |
+          (ev.metaKey ? MOD_META : 0);
+        send({ t: "key", k: "press", key: ev.key, modifiers });
       });
 
       btnIdr.addEventListener("click", () => send({ t: "req_idr" }));

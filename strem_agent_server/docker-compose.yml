@@ -1,0 +1,13 @@
+services:
+  strem_agent_server:
+    build:
+      context: .
+    image: strem-agent-server:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      # Entry will read /config/strem_agent_server.env by default.
+      STREM_AGENT_SERVER_ENV_FILE: /config/strem_agent_server.env
+    volumes:
+      # Create this file from strem_agent_server.env.example.
+      - ./strem_agent_server.env:/config/strem_agent_server.env:ro

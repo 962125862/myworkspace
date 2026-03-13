@@ -1,0 +1,4 @@
+services:
+  agent_link_service:
+    image: agent-link-service:local
+

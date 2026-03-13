@@ -53,6 +53,53 @@ ls -l build/strem_agent_server
 ./build/strem_agent_server --token your_token ...
 ```
 
+### 1.4 （可选）用 Docker 运行 strem_agent_server
+
+构建镜像：
+
+```bash
+cd /home/gejun/work/my_ml_work/strem_agent_server
+docker build -t strem-agent-server:latest .
+```
+
+启动（推荐 `--network host`，省去端口映射，且 UDP 控制更直观）：
+
+```bash
+docker run --rm -it --network host \
+  -e AGENT_TOKEN=your_token \
+  -e IN_HOST=0.0.0.0 -e IN_PORT=19000 \
+  -e VIDEO_BIND=0.0.0.0 -e VIDEO_PORT=31234 \
+  -e CTRL_BIND=0.0.0.0 -e CTRL_PORT=31235 \
+  -e WORKER_CTRL_IP=127.0.0.1 -e WORKER_CTRL_PORT=50001 \
+  strem-agent-server:latest
+```
+
+#### 用挂载配置文件启动（推荐）
+
+准备一份配置文件（参考示例）：
+
+```bash
+cd /home/gejun/work/my_ml_work/strem_agent_server
+cp -v strem_agent_server.env.example strem_agent_server.env
+```
+
+用 env 文件启动：
+
+```bash
+docker run --rm -it --network host \
+  -e STREM_AGENT_SERVER_ENV_FILE=/config/strem_agent_server.env \
+  -v "$(pwd)/strem_agent_server.env:/config/strem_agent_server.env:ro" \
+  strem-agent-server:latest
+```
+
+或用 compose（示例文件已提供）：
+
+```bash
+cd /home/gejun/work/my_ml_work/strem_agent_server
+docker compose up -d --build
+docker compose logs -f --tail 100
+```
+
 ### 1.3 防火墙
 
 对公网开放：

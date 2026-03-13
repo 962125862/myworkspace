@@ -16,6 +16,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import platform
 import socket
 import struct
 import subprocess
@@ -53,15 +54,21 @@ KEY_ACTION_UP = 0x04
 
 _CMD_STRUCT = struct.Struct("<IHHiiiiQ")
 
+MODIFIER_SHIFT = 0x01
+MODIFIER_CTRL = 0x02
+MODIFIER_ALT = 0x04
+MODIFIER_META = 0x08
+
 
 def be32(n: int) -> bytes:
     return struct.pack(">I", n)
 
 
 class CtrlSender:
-    def __init__(self, host: str, port: int, token: str = ""):
+    def __init__(self, host: str, port: int, token: str = "", stream_id: int = 1):
         self.addr = (host, int(port))
         self.token = token
+        self.stream_id = int(stream_id)
         self.sock: socket.socket | None = None
         self.seq = 0
         self.lock = threading.Lock()
@@ -71,6 +78,8 @@ class CtrlSender:
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if self.token:
             s.sendall(f"AUTH {self.token}\n".encode("utf-8"))
+        # Optional SUB line: newer servers/proxies use it for per-stream bookkeeping.
+        s.sendall(f"SUB {self.stream_id}\n".encode("utf-8"))
         self.sock = s
 
     def _send(self, cmd_type: int, a=0, b=0, c=0, d=0, payload: bytes = b""):
@@ -114,6 +123,16 @@ class CtrlSender:
     def key_press(self, vk: int, modifiers: int = 0):
         # a=keyCode(VK), b=modifiers
         self._send(ML_CTRL_CMD_KEY_PRESS, vk, modifiers, 0, 0)
+
+    def key(self, vk: int, action: int, modifiers: int = 0):
+        # a=keyCode(VK), b=keyAction, c=modifiers
+        self._send(ML_CTRL_CMD_KEYBOARD, vk, action, modifiers, 0)
+
+    def key_down(self, vk: int, modifiers: int = 0):
+        self.key(vk, KEY_ACTION_DOWN, modifiers)
+
+    def key_up(self, vk: int, modifiers: int = 0):
+        self.key(vk, KEY_ACTION_UP, modifiers)
 
     def text(self, s: str):
         payload = s.encode("utf-8", errors="ignore")
@@ -172,6 +191,109 @@ def vk_from_ascii(ch: str) -> int:
         "`": 0xC0,  # VK_OEM_3
     }
     return oem.get(c, 0)
+
+
+def vk_from_pynput_key(key, *, map_mac_meta_to_ctrl: bool) -> int:
+    """Map pynput Key/KeyCode to Win32 VK code (best-effort).
+
+    For simple ASCII chars, use vk_from_ascii() (US layout).
+    For special keys, return the common VK_* values.
+    """
+    # Lazy import so the client still runs without pynput installed.
+    try:  # pragma: no cover
+        from pynput.keyboard import Key, KeyCode  # type: ignore
+    except Exception:  # pragma: no cover
+        return 0
+
+    if isinstance(key, KeyCode):
+        # On Windows, KeyCode.vk is usually a Win32 VK already.
+        vk = getattr(key, "vk", None)
+        if isinstance(vk, int) and 0 < vk <= 0xFF:
+            return int(vk)
+        ch = getattr(key, "char", None)
+        if isinstance(ch, str) and ch:
+            # Normalize to a base key for symbols that require Shift on US layout.
+            shift_map = {
+                "!": "1",
+                "@": "2",
+                "#": "3",
+                "$": "4",
+                "%": "5",
+                "^": "6",
+                "&": "7",
+                "*": "8",
+                "(": "9",
+                ")": "0",
+                "_": "-",
+                "+": "=",
+                "{": "[",
+                "}": "]",
+                "|": "\\",
+                ":": ";",
+                "\"": "'",
+                "<": ",",
+                ">": ".",
+                "?": "/",
+                "~": "`",
+            }
+            base = shift_map.get(ch, ch)
+            return vk_from_ascii(base)
+        return 0
+
+    # Special keys
+    special = {
+        Key.enter: 0x0D,  # VK_RETURN
+        Key.tab: 0x09,  # VK_TAB
+        Key.space: 0x20,  # VK_SPACE
+        Key.backspace: 0x08,  # VK_BACK
+        Key.esc: 0x1B,  # VK_ESCAPE
+        Key.delete: 0x2E,  # VK_DELETE
+        Key.insert: 0x2D,  # VK_INSERT
+        Key.home: 0x24,  # VK_HOME
+        Key.end: 0x23,  # VK_END
+        Key.page_up: 0x21,  # VK_PRIOR
+        Key.page_down: 0x22,  # VK_NEXT
+        Key.up: 0x26,  # VK_UP
+        Key.down: 0x28,  # VK_DOWN
+        Key.left: 0x25,  # VK_LEFT
+        Key.right: 0x27,  # VK_RIGHT
+        Key.caps_lock: 0x14,  # VK_CAPITAL
+        Key.shift: 0x10,  # VK_SHIFT
+        Key.shift_l: 0xA0,  # VK_LSHIFT
+        Key.shift_r: 0xA1,  # VK_RSHIFT
+        Key.ctrl: 0x11,  # VK_CONTROL
+        Key.ctrl_l: 0xA2,  # VK_LCONTROL
+        Key.ctrl_r: 0xA3,  # VK_RCONTROL
+        Key.alt: 0x12,  # VK_MENU
+        Key.alt_l: 0xA4,  # VK_LMENU
+        Key.alt_r: 0xA5,  # VK_RMENU
+        # On macOS, this is Command. If map is enabled, treat it as CTRL so shortcuts behave.
+        Key.cmd: 0xA2 if map_mac_meta_to_ctrl else 0x5B,  # VK_LCONTROL or VK_LWIN
+        Key.cmd_l: 0xA2 if map_mac_meta_to_ctrl else 0x5B,
+        Key.cmd_r: 0xA3 if map_mac_meta_to_ctrl else 0x5C,  # VK_RCONTROL or VK_RWIN
+    }
+
+    # Function keys (F1..F12)
+    if key in (Key.f1, Key.f2, Key.f3, Key.f4, Key.f5, Key.f6, Key.f7, Key.f8, Key.f9, Key.f10, Key.f11, Key.f12):
+        base = [Key.f1, Key.f2, Key.f3, Key.f4, Key.f5, Key.f6, Key.f7, Key.f8, Key.f9, Key.f10, Key.f11, Key.f12].index(key)
+        return 0x70 + base  # VK_F1 == 0x70
+
+    return special.get(key, 0)
+
+
+def modifiers_from_pynput_state(*, shift: bool, ctrl: bool, alt: bool, meta: bool, map_mac_meta_to_ctrl: bool) -> int:
+    m = 0
+    if shift:
+        m |= MODIFIER_SHIFT
+    if ctrl:
+        m |= MODIFIER_CTRL
+    if alt:
+        m |= MODIFIER_ALT
+    if meta:
+        m |= MODIFIER_META
+    if map_mac_meta_to_ctrl and (m & MODIFIER_META) and not (m & MODIFIER_CTRL):
+        m = (m | MODIFIER_CTRL) & ~MODIFIER_META
+    return m
 
 
 @dataclass
@@ -388,6 +510,18 @@ def main() -> int:
     ap.add_argument("--stream-id", type=int, default=1)
     ap.add_argument("--token", default="")
     ap.add_argument(
+        "--keyboard-backend",
+        choices=["cv2", "pynput", "none"],
+        default="cv2",
+        help="Keyboard capture backend. 'pynput' supports key down/up + modifiers (global hook).",
+    )
+    ap.add_argument(
+        "--map-mac-meta-to-ctrl",
+        type=int,
+        default=-1,
+        help="If 1: map macOS META(Command) modifier to CTRL. If 0: disable. If -1: auto (enable on macOS).",
+    )
+    ap.add_argument(
         "--ctrl-ref-w",
         type=int,
         default=0,
@@ -409,10 +543,85 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    ctrl = CtrlSender(args.host, args.ctrl_port, token=args.token)
+    ctrl = CtrlSender(args.host, args.ctrl_port, token=args.token, stream_id=args.stream_id)
     ctrl.connect()
     # Improve late-join experience: request an IDR soon.
     ctrl.request_idr()
+
+    # Optional: better keyboard capture via pynput (global hook).
+    stop = threading.Event()
+    if args.keyboard_backend == "pynput":
+        try:
+            from pynput import keyboard as _kb  # type: ignore
+
+            mod = {"shift": False, "ctrl": False, "alt": False, "meta": False}
+            sys = platform.system().lower()
+            auto_map = ("darwin" in sys) or ("mac" in sys)
+            map_meta = auto_map if int(args.map_mac_meta_to_ctrl) < 0 else bool(int(args.map_mac_meta_to_ctrl))
+
+            def _set_mod(k, down: bool):
+                try:
+                    if k in (_kb.Key.shift, _kb.Key.shift_l, _kb.Key.shift_r):
+                        mod["shift"] = down
+                    elif k in (_kb.Key.ctrl, _kb.Key.ctrl_l, _kb.Key.ctrl_r):
+                        mod["ctrl"] = down
+                    elif k in (_kb.Key.alt, _kb.Key.alt_l, _kb.Key.alt_r):
+                        mod["alt"] = down
+                    elif k in (_kb.Key.cmd, _kb.Key.cmd_l, _kb.Key.cmd_r):
+                        mod["meta"] = down
+                except Exception:
+                    pass
+
+            def on_press(k):
+                _set_mod(k, True)
+                vk = vk_from_pynput_key(k, map_mac_meta_to_ctrl=map_meta)
+                if not vk:
+                    # Fallback: printable chars as text
+                    ch = getattr(k, "char", None)
+                    if isinstance(ch, str) and ch:
+                        ctrl.text(ch)
+                    return
+
+                if vk == 0x1B:  # ESC: quit local client
+                    stop.set()
+                    return
+
+                m = modifiers_from_pynput_state(
+                    shift=mod["shift"],
+                    ctrl=mod["ctrl"],
+                    alt=mod["alt"],
+                    meta=mod["meta"],
+                    map_mac_meta_to_ctrl=map_meta,
+                )
+
+                # If this key is a shifted symbol (e.g. '!'), ensure SHIFT is set in modifiers.
+                ch = getattr(k, "char", None)
+                if isinstance(ch, str) and ch:
+                    if ch.isupper() or ch in "!@#$%^&*()_+{}|:\"<>?~":
+                        m |= MODIFIER_SHIFT
+
+                ctrl.key_down(vk, m)
+
+            def on_release(k):
+                _set_mod(k, False)
+                vk = vk_from_pynput_key(k, map_mac_meta_to_ctrl=map_meta)
+                if not vk:
+                    return
+                m = modifiers_from_pynput_state(
+                    shift=mod["shift"],
+                    ctrl=mod["ctrl"],
+                    alt=mod["alt"],
+                    meta=mod["meta"],
+                    map_mac_meta_to_ctrl=map_meta,
+                )
+                ctrl.key_up(vk, m)
+
+            listener = _kb.Listener(on_press=on_press, on_release=on_release)
+            listener.daemon = True
+            listener.start()
+        except Exception as e:
+            print(f"[kbd] pynput disabled: {e}")
+            args.keyboard_backend = "cv2"
 
     latest = {"img": None}
     lock = threading.Lock()
@@ -566,26 +775,29 @@ def main() -> int:
             show = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
             cv2.imshow(win, show)
         k = cv2.waitKey(1) & 0xFF
-        if k == 27:  # ESC
+        if stop.is_set():
             break
+        if args.keyboard_backend == "cv2":
+            if k == 27:  # ESC
+                break
 
-        # Basic keyboard integration (best-effort): send VK key press for common ASCII keys.
-        # Note: OpenCV doesn't expose key-up events, so this is "press" (down+up) behavior.
-        if k != 255:
-            if k == 8:
-                ctrl.key_press(0x08)  # VK_BACK
-            elif k == 13:
-                ctrl.key_press(0x0D)  # VK_RETURN
-            elif k == 9:
-                ctrl.key_press(0x09)  # VK_TAB
-            elif 32 <= k <= 126:
-                ch = chr(k)
-                vk = vk_from_ascii(ch)
-                if vk:
-                    ctrl.key_press(vk)
-                else:
-                    # Fallback: text input
-                    ctrl.text(ch)
+            # Basic keyboard integration (best-effort): send VK key press for common ASCII keys.
+            # Note: OpenCV doesn't expose key-up events, so this is "press" (down+up) behavior.
+            if k != 255:
+                if k == 8:
+                    ctrl.key_press(0x08)  # VK_BACK
+                elif k == 13:
+                    ctrl.key_press(0x0D)  # VK_RETURN
+                elif k == 9:
+                    ctrl.key_press(0x09)  # VK_TAB
+                elif 32 <= k <= 126:
+                    ch = chr(k)
+                    vk = vk_from_ascii(ch)
+                    if vk:
+                        ctrl.key_press(vk)
+                    else:
+                        # Fallback: text input
+                        ctrl.text(ch)
         # avoid tight loop when no frames
         if img is None:
             time.sleep(0.01)

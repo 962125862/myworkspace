@@ -27,6 +27,7 @@ def connect_and_stream() -> int:
     stream_id = env_int("STREAM_ID", 1)
 
     mtx_rtsp = os.getenv("MTX_RTSP_URL", "rtsp://127.0.0.1:8554/mystream")
+    ff_loglevel = os.getenv("FFMPEG_LOGLEVEL", "warning")
 
     log(f"connect agent video: {agent_host}:{agent_port} (stream_id={stream_id})")
     s = socket.create_connection((agent_host, agent_port), timeout=5)
@@ -43,11 +44,15 @@ def connect_and_stream() -> int:
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
-        "warning",
+        ff_loglevel,
         "-fflags",
-        "nobuffer",
+        "+nobuffer+genpts",
         "-flags",
         "low_delay",
+        # Raw H264 has no timestamps; use wallclock to avoid "unset timestamps" behavior that can
+        # amplify jitter buffering downstream (mediamtx/webrtc).
+        "-use_wallclock_as_timestamps",
+        "1",
         "-probesize",
         "32",
         "-analyzeduration",
@@ -59,6 +64,13 @@ def connect_and_stream() -> int:
         "-an",
         "-c:v",
         "copy",
+        # Reduce mux latency on the publishing side.
+        "-muxdelay",
+        "0",
+        "-muxpreload",
+        "0",
+        "-flush_packets",
+        "1",
         "-f",
         "rtsp",
         "-rtsp_transport",
@@ -118,4 +130,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

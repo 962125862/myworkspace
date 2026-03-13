@@ -1,0 +1,31 @@
+services:
+  strem_agent_server:
+    image: ghcr.io/962125862/myworkspace/strem-agent-server:latest
+    container_name: strem_agent_server
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      STREM_AGENT_SERVER_ENV_FILE: /config/strem_agent_server.env
+    volumes:
+      - ./config/strem_agent_server.env:/config/strem_agent_server.env:ro
+
+  agent_link_service:
+    image: ghcr.io/962125862/myworkspace/agent-link-service:latest
+    container_name: agent_link_service
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - ./config/agent_link_service.env
+    volumes:
+      # To manage ml_worker containers from inside agent_link_service.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Let mlctl.sh clean host shm files if needed.
+      - /dev/shm:/dev/shm
+      # Persist worker configs + keys.
+      - agent_stack_workers:/app/workers
+      - agent_stack_data:/app/data
+
+volumes:
+  agent_stack_workers:
+  agent_stack_data:
+

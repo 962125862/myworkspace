@@ -1,0 +1,26 @@
+services:
+  strem_agent_server:
+    build:
+      context: ../../strem_agent_server
+    image: strem-agent-server:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      STREM_AGENT_SERVER_ENV_FILE: /config/strem_agent_server.env
+    volumes:
+      - ./config/strem_agent_server.env:/config/strem_agent_server.env:ro
+
+  agent_link_service:
+    build:
+      context: ../..
+      dockerfile: deploy/agent_stack/agent_link_service.Dockerfile
+    image: agent-link-service:latest
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - ./config/agent_link_service.env
+    volumes:
+      # To run mlctl.sh inside the container.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Repo mount for mlctl.sh + workers/data.
+      - ../..:/repo
