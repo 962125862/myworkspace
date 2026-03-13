@@ -5,3 +5,6 @@ FROM ${BASE_IMAGE}
 # to rebuild from scratch when the base image is already present locally.
 COPY agent_link_service.py /app/agent_link_service.py
 
+# Also hotfix mlctl.sh so env-based defaults (e.g. ML_WORKER_DEFAULT_WIDTH/HEIGHT)
+# take effect without requiring per-worker config edits.
+COPY mlctl.sh /app/mlctl.sh
