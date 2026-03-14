@@ -62,7 +62,11 @@ deploy/image/ml_worker
 deploy/image/lib/
 
 # Third party deps
-third_party/
+third_party/*
+!third_party/moonlight-common-c/
+!third_party/moonlight-common-c/**
+!third_party/moonlight-embedded/
+!third_party/moonlight-embedded/**
 
 # Local build dir
 build-ninja/
