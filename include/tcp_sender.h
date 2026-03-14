@@ -34,6 +34,12 @@ typedef struct {
     uint32_t height;        /* 视频高度 */
     uint32_t fps;           /* 帧率 */
     uint32_t bitrate;       /* 码率 */
+    uint32_t codec;         /* 0=h264, 1=hevc, 2=av1 */
+    uint32_t chroma;        /* 0=420, 1=444 */
+    uint32_t bitdepth;      /* 8 / 10 */
+    uint32_t video_format;  /* negotiated Limelight video format */
+    uint32_t color_space;   /* Limelight color space enum */
+    uint32_t color_range;   /* Limelight color range enum */
 } TcpSenderConfig;
 
 /* TCP发送器上下文 */

@@ -16,6 +16,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 
 /* Intel VA-API */
@@ -65,6 +66,15 @@ struct DecoderCtx {
     double total_decode_time;
 };
 
+static const char* codec_name_from_id(enum AVCodecID codec_id) {
+    switch (codec_id) {
+        case AV_CODEC_ID_H264: return "H.264";
+        case AV_CODEC_ID_HEVC: return "HEVC";
+        case AV_CODEC_ID_AV1:  return "AV1";
+        default:               return "unknown";
+    }
+}
+
 /* 检测硬件支持 */
 DecodeBackend decoder_detect_backend(void) {
     /* 优先检测 NVIDIA */
@@ -107,6 +117,20 @@ const char* decoder_backend_name(DecodeBackend backend) {
 }
 
 /* 获取硬件像素格式 (参考 embedded ffmpeg_vaapi.c) */
+static enum AVPixelFormat choose_software_format(const enum AVPixelFormat* pix_fmts) {
+    const enum AVPixelFormat* p;
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(*p);
+        if (!desc) {
+            continue;
+        }
+        if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+            return *p;
+        }
+    }
+    return AV_PIX_FMT_NONE;
+}
+
 static enum AVPixelFormat get_hw_format(AVCodecContext* ctx, 
                                         const enum AVPixelFormat* pix_fmts) {
     DecoderCtx* dec_ctx = (DecoderCtx*)ctx->opaque;
@@ -117,20 +141,44 @@ static enum AVPixelFormat get_hw_format(AVCodecContext* ctx,
             return *p;
         }
     }
+
+    enum AVPixelFormat sw_fmt = choose_software_format(pix_fmts);
+    if (sw_fmt != AV_PIX_FMT_NONE) {
+        fprintf(stderr,
+                "[Decoder] hw format %d unavailable for this stream, fallback sw fmt=%d\n",
+                dec_ctx->hw_pix_fmt, sw_fmt);
+        return sw_fmt;
+    }
     return AV_PIX_FMT_NONE;
 }
 
 /* VA-API 格式回调 (参考 embedded ffmpeg_vaapi.c va_get_format) */
 static enum AVPixelFormat vaapi_get_format(AVCodecContext* ctx,
                                            const enum AVPixelFormat* pix_fmts) {
-    (void)pix_fmts;
     DecoderCtx* dec_ctx = (DecoderCtx*)ctx->opaque;
+    const enum AVPixelFormat* p;
+
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (*p == AV_PIX_FMT_VAAPI) {
+            break;
+        }
+    }
+    if (*p == AV_PIX_FMT_NONE) {
+        enum AVPixelFormat sw_fmt = choose_software_format(pix_fmts);
+        if (sw_fmt != AV_PIX_FMT_NONE) {
+            fprintf(stderr,
+                    "[Decoder] VAAPI unsupported for this stream, fallback sw fmt=%d\n",
+                    sw_fmt);
+            return sw_fmt;
+        }
+        return AV_PIX_FMT_NONE;
+    }
 
     /* 创建硬件帧上下文 */
     AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(dec_ctx->hw_device_ctx);
     if (!hw_frames_ref) {
         fprintf(stderr, "[Decoder] Failed to allocate VAAPI frame context\n");
-        return AV_PIX_FMT_NONE;
+        return get_hw_format(ctx, pix_fmts);
     }
 
     AVHWFramesContext* frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
@@ -143,7 +191,7 @@ static enum AVPixelFormat vaapi_get_format(AVCodecContext* ctx,
     if (av_hwframe_ctx_init(hw_frames_ref) < 0) {
         fprintf(stderr, "[Decoder] Failed to initialize VAAPI frame context\n");
         av_buffer_unref(&hw_frames_ref);
-        return AV_PIX_FMT_NONE;
+        return get_hw_format(ctx, pix_fmts);
     }
 
     ctx->pix_fmt = AV_PIX_FMT_VAAPI;
@@ -164,6 +212,19 @@ static int hw_get_buffer(AVCodecContext* ctx, AVFrame* frame, int flags) {
     return av_hwframe_get_buffer(ctx->hw_frames_ctx, frame, 0);
 }
 
+static DecodeFormat decode_format_from_av(enum AVPixelFormat fmt) {
+    switch (fmt) {
+        case AV_PIX_FMT_NV12:
+            return DECODE_FMT_NV12;
+        case AV_PIX_FMT_YUV420P:
+            return DECODE_FMT_YUV420P;
+        case AV_PIX_FMT_YUV444P:
+            return DECODE_FMT_YUV444P;
+        default:
+            return DECODE_FMT_NONE;
+    }
+}
+
 /*
  * 计算给定像素格式下各 plane 的有效高度（用于深拷贝）。
  * 注意：frame->linesize 可能包含 padding，但“行数”必须按格式计算。
@@ -176,6 +237,9 @@ static int plane_height_for_pix_fmt(enum AVPixelFormat fmt, int plane, int heigh
         case AV_PIX_FMT_YUV420P:
             /* Y: H, U/V: H/2 */
             return (plane == 0) ? height : ((plane == 1 || plane == 2) ? height / 2 : 0);
+        case AV_PIX_FMT_YUV444P:
+            /* Y/U/V: H */
+            return (plane >= 0 && plane <= 2) ? height : 0;
         case AV_PIX_FMT_BGRA:
         case AV_PIX_FMT_RGBA:
         case AV_PIX_FMT_RGB24:
@@ -193,6 +257,8 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
     
     memcpy(&ctx->config, config, sizeof(*config));
     
+    enum AVCodecID codec_id = config->codec_id ? config->codec_id : AV_CODEC_ID_H264;
+
     /* 自动检测后端 */
     if (ctx->config.backend == DECODE_BACKEND_AUTO) {
         ctx->config.backend = decoder_detect_backend();
@@ -201,42 +267,32 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
     /* 查找解码器 */
     switch (ctx->config.backend) {
         case DECODE_BACKEND_INTEL_VA:
-            /* 
-             * Intel VA-API 硬件解码 (参考 embedded ffmpeg.c)
-             * 使用通用 h264 解码器 + VA-API hwaccel
-             * 这种方式比 h264_qsv 更稳定，不需要 Intel Media SDK
-             */
-            ctx->codec = avcodec_find_decoder_by_name("h264");
+            ctx->codec = avcodec_find_decoder(codec_id);
             if (!ctx->codec) {
-                fprintf(stderr, "[Decoder] H.264 decoder not found\n");
+                fprintf(stderr, "[Decoder] %s decoder not found\n", codec_name_from_id(codec_id));
                 free(ctx);
                 return NULL;
             }
-            printf("[Decoder] Using H.264 decoder with VA-API hwaccel\n");
+            printf("[Decoder] Using %s decoder with VA-API hwaccel\n", codec_name_from_id(codec_id));
             break;
             
         case DECODE_BACKEND_NVIDIA:
-            /* 
-             * NVIDIA NVDEC 硬件解码
-             * 使用通用 h264 解码器 + CUDA hwaccel
-             * 配合 H264 parser 自动解析 SPS/PPS
-             */
-            ctx->codec = avcodec_find_decoder_by_name("h264");
+            ctx->codec = avcodec_find_decoder(codec_id);
             if (!ctx->codec) {
-                fprintf(stderr, "[Decoder] H.264 decoder not found\n");
+                fprintf(stderr, "[Decoder] %s decoder not found\n", codec_name_from_id(codec_id));
                 free(ctx);
                 return NULL;
             }
-            printf("[Decoder] Using H.264 decoder with CUDA hwaccel\n");
+            printf("[Decoder] Using %s decoder with CUDA hwaccel\n", codec_name_from_id(codec_id));
             break;
             
         default:
-            ctx->codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+            ctx->codec = avcodec_find_decoder(codec_id);
             break;
     }
     
     if (!ctx->codec) {
-        fprintf(stderr, "[Decoder] H.264 decoder not found\n");
+        fprintf(stderr, "[Decoder] %s decoder not found\n", codec_name_from_id(codec_id));
         free(ctx);
         return NULL;
     }
@@ -255,10 +311,10 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
         return NULL;
     }
     
-    /* 初始化 H264 Parser - 自动解析 SPS/PPS */
-    ctx->parser = av_parser_init(AV_CODEC_ID_H264);
+    /* 初始化 codec parser */
+    ctx->parser = av_parser_init(codec_id);
     if (!ctx->parser) {
-        fprintf(stderr, "[Decoder] Failed to create H264 parser\n");
+        fprintf(stderr, "[Decoder] Failed to create %s parser\n", codec_name_from_id(codec_id));
         decoder_destroy(ctx);
         return NULL;
     }
@@ -559,13 +615,7 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
             frame->key_frame = !!(sw_frame->flags & AV_FRAME_FLAG_KEY);
             frame->_decoder_ctx = ctx;
             
-            if (sw_frame->format == AV_PIX_FMT_NV12) {
-                frame->format = DECODE_FMT_NV12;
-            } else if (sw_frame->format == AV_PIX_FMT_YUV420P) {
-                frame->format = DECODE_FMT_YUV420P;
-            } else {
-                frame->format = DECODE_FMT_NONE;
-            }
+            frame->format = decode_format_from_av((enum AVPixelFormat)sw_frame->format);
             
             if (tmp_frame) {
                 frame->av_frame = tmp_frame;
@@ -691,13 +741,7 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
         }
     }
 
-    if (sw_frame->format == AV_PIX_FMT_NV12) {
-        frame->format = DECODE_FMT_NV12;
-    } else if (sw_frame->format == AV_PIX_FMT_YUV420P) {
-        frame->format = DECODE_FMT_YUV420P;
-    } else {
-        frame->format = DECODE_FMT_NONE;
-    }
+    frame->format = decode_format_from_av((enum AVPixelFormat)sw_frame->format);
 
     if (tmp_frame) {
         /* 零拷贝：frame 持有 AVFrame 所有权 */
@@ -733,15 +777,25 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
                            DecodedFrame* dst, DecodeFormat target_format) {
     if (!ctx || !src || !dst) return -1;
     
-    /* 允许 NV12 / YUV420P -> BGRA（CPU fallback 时通常为 YUV420P） */
-    if ((src->format != DECODE_FMT_NV12 && src->format != DECODE_FMT_YUV420P) ||
-        target_format != DECODE_FMT_BGRA) {
+    /* 允许 NV12 / YUV420P / YUV444P -> BGRA */
+    if (target_format != DECODE_FMT_BGRA) {
         return -1;
     }
 
-    enum AVPixelFormat src_pix_fmt = (src->format == DECODE_FMT_NV12)
-                                       ? AV_PIX_FMT_NV12
-                                       : AV_PIX_FMT_YUV420P;
+    enum AVPixelFormat src_pix_fmt;
+    switch (src->format) {
+        case DECODE_FMT_NV12:
+            src_pix_fmt = AV_PIX_FMT_NV12;
+            break;
+        case DECODE_FMT_YUV420P:
+            src_pix_fmt = AV_PIX_FMT_YUV420P;
+            break;
+        case DECODE_FMT_YUV444P:
+            src_pix_fmt = AV_PIX_FMT_YUV444P;
+            break;
+        default:
+            return -1;
+    }
     
     /* 初始化 SwsContext（如果未初始化） */
     if (!ctx->sws_ctx) {
@@ -775,7 +829,7 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
     int src_linesize[4] = { src->linesize[0], src->linesize[1], 0, 0 };
     int dst_linesize[4] = { dst->linesize[0], 0, 0, 0 };
 
-    if (src->format == DECODE_FMT_YUV420P) {
+    if (src->format == DECODE_FMT_YUV420P || src->format == DECODE_FMT_YUV444P) {
         src_linesize[2] = src->linesize[2];
     }
     

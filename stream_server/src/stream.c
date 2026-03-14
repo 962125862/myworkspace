@@ -16,9 +16,107 @@
 
 #include <unistd.h>
 
-static int env_enabled(const char* name) {
-    const char* v = getenv(name);
-    return (v && atoi(v) > 0);
+enum {
+    STREAM_CODEC_H264 = 0,
+    STREAM_CODEC_HEVC = 1,
+    STREAM_CODEC_AV1 = 2,
+};
+
+enum {
+    ROUTE_ANY = -1,
+};
+
+typedef struct {
+    int codec;              /* STREAM_CODEC_* or ROUTE_ANY */
+    int chroma;             /* 0=420, 1=444, or ROUTE_ANY */
+    int bitdepth;           /* 8/10 or ROUTE_ANY */
+    DecodeBackend backend;  /* preferred decoder backend */
+    const char* reason;     /* log/debug note */
+} DecodeRouteRule;
+
+static enum AVCodecID codec_id_from_stream_info(const StreamInfo* info) {
+    if (!info) {
+        return AV_CODEC_ID_H264;
+    }
+    switch (info->codec) {
+        case STREAM_CODEC_HEVC:
+            return AV_CODEC_ID_HEVC;
+        case STREAM_CODEC_AV1:
+            return AV_CODEC_ID_AV1;
+        case STREAM_CODEC_H264:
+        default:
+            return AV_CODEC_ID_H264;
+    }
+}
+
+static const char* codec_name_from_stream_info(const StreamInfo* info) {
+    if (!info) {
+        return "h264";
+    }
+    switch (info->codec) {
+        case STREAM_CODEC_HEVC: return "hevc";
+        case STREAM_CODEC_AV1:  return "av1";
+        case STREAM_CODEC_H264:
+        default:               return "h264";
+    }
+}
+
+/*
+ * Hard-coded decode routing rules for the mixed Intel + NVIDIA host.
+ *
+ * Rules are matched from top to bottom; the first match wins.
+ *
+ * How to extend:
+ * 1. Add a new entry near the top if it is more specific / higher priority.
+ * 2. Use ROUTE_ANY for fields you don't want to constrain.
+ * 3. Keep a short "reason" string so logs explain why a backend was chosen.
+ *
+ * Current policy:
+ * - HEVC 4:4:4 goes to NVIDIA first, because Intel VAAPI on this host fails on 4:4:4 in practice.
+ * - Everything else prefers Intel first.
+ * - Runtime fallback order is handled in stream_init_decoder():
+ *     Intel -> NVIDIA -> CPU
+ *     NVIDIA -> CPU
+ */
+static const DecodeRouteRule k_decode_route_rules[] = {
+    { STREAM_CODEC_HEVC, 1, ROUTE_ANY, DECODE_BACKEND_NVIDIA,
+      "HEVC 4:4:4 prefers NVIDIA on this host" },
+    { ROUTE_ANY,         ROUTE_ANY, ROUTE_ANY, DECODE_BACKEND_INTEL_VA,
+      "non-HEVC444 prefers Intel VAAPI on this host" },
+};
+
+static int route_rule_matches(const DecodeRouteRule* rule, const StreamInfo* info) {
+    if (!rule || !info) {
+        return 0;
+    }
+    if (rule->codec != ROUTE_ANY && rule->codec != (int)info->codec) {
+        return 0;
+    }
+    if (rule->chroma != ROUTE_ANY && rule->chroma != (int)info->chroma) {
+        return 0;
+    }
+    if (rule->bitdepth != ROUTE_ANY && rule->bitdepth != (int)info->bitdepth) {
+        return 0;
+    }
+    return 1;
+}
+
+static DecodeBackend adjust_backend_for_stream(const StreamInfo* info, DecodeBackend backend) {
+    if (!info) {
+        return backend;
+    }
+
+    for (size_t i = 0; i < sizeof(k_decode_route_rules) / sizeof(k_decode_route_rules[0]); i++) {
+        const DecodeRouteRule* rule = &k_decode_route_rules[i];
+        if (route_rule_matches(rule, info)) {
+            printf("[Stream] route matched: codec=%s chroma=%u bitdepth=%u -> %s (%s)\n",
+                   codec_name_from_stream_info(info), info->chroma, info->bitdepth,
+                   decoder_backend_name(rule->backend), rule->reason);
+            return rule->backend;
+        }
+    }
+
+    return backend;
 }
 
 int stream_manager_init(StreamManager* mgr) {
@@ -33,8 +131,6 @@ int stream_manager_init(StreamManager* mgr) {
         stream->stream_id = i + 1;  /* stream_id 从1开始 */
         snprintf(stream->name, sizeof(stream->name), "stream_%02d", i + 1);
         stream->state = STREAM_STATE_IDLE;
-        stream->shm_enabled = env_enabled("ENABLE_SHM");
-        stream->shm_opened = false;
         pthread_mutex_init(&stream->lock, NULL);
     }
     
@@ -56,10 +152,6 @@ void stream_manager_destroy(StreamManager* mgr) {
     for (int i = 0; i < MAX_STREAMS; i++) {
         StreamContext* stream = &mgr->streams[i];
         stream_close_decoder(stream);
-        if (stream->shm_opened) {
-            shm_frame_writer_close(&stream->shm_writer);
-            stream->shm_opened = false;
-        }
         pthread_mutex_destroy(&stream->lock);
     }
 
@@ -183,8 +275,11 @@ int stream_init_decoder(StreamContext* stream, int backend) {
         return 0;  /* 已初始化 */
     }
     
+    DecodeBackend selected_backend = adjust_backend_for_stream(&stream->info, (DecodeBackend)backend);
+
     DecoderConfig config = {
-        .backend = (DecodeBackend)backend,
+        .backend = selected_backend,
+        .codec_id = codec_id_from_stream_info(&stream->info),
         .width = stream->info.width,
         .height = stream->info.height,
         .output_format = DECODE_FMT_NV12,
@@ -193,16 +288,47 @@ int stream_init_decoder(StreamContext* stream, int backend) {
         .cuda_device_id = 0
     };
     
-    DecoderCtx* ctx = decoder_create(&config);
-    if (!ctx) {
-        pthread_mutex_unlock(&stream->lock);
-        fprintf(stderr, "[Stream %d] Failed to create decoder\n", stream->stream_id);
-        return -1;
+    DecoderCtx* ctx = NULL;
+    DecodeBackend attempted_backends[3];
+    size_t attempt_count = 0;
+
+    attempted_backends[attempt_count++] = selected_backend;
+    if (selected_backend == DECODE_BACKEND_INTEL_VA) {
+        attempted_backends[attempt_count++] = DECODE_BACKEND_NVIDIA;
     }
-    
-    /* 初始化解码器（无 extradata，从流中提取） */
-    if (decoder_init(ctx, NULL, 0) < 0) {
+    if (selected_backend != DECODE_BACKEND_CPU) {
+        attempted_backends[attempt_count++] = DECODE_BACKEND_CPU;
+    }
+
+    /*
+     * The route table selects a preferred backend for the stream profile.
+     * Fallback order on this host is:
+     *   Intel -> NVIDIA -> CPU
+     *   NVIDIA -> CPU
+     *   CPU only
+     * This keeps 4:2:0 on Intel when available, but still allows NVIDIA
+     * to rescue streams that Intel cannot initialize.
+     */
+    for (size_t i = 0; i < attempt_count; i++) {
+        config.backend = attempted_backends[i];
+        ctx = decoder_create(&config);
+        if (!ctx) {
+            continue;
+        }
+
+        if (decoder_init(ctx, NULL, 0) == 0) {
+            break;
+        }
+
+        fprintf(stderr,
+                "[Stream %d] Decoder init failed with %s, %s\n",
+                stream->stream_id, decoder_backend_name(config.backend),
+                (i + 1 < attempt_count) ? "retrying CPU fallback" : "no more fallbacks");
         decoder_destroy(ctx);
+        ctx = NULL;
+    }
+
+    if (!ctx) {
         pthread_mutex_unlock(&stream->lock);
         fprintf(stderr, "[Stream %d] Failed to init decoder\n", stream->stream_id);
         return -1;
@@ -213,23 +339,11 @@ int stream_init_decoder(StreamContext* stream, int backend) {
     memset(&stream->decode_stats, 0, sizeof(stream->decode_stats));
     stream->decode_stats.last_fps_calc_time = time(NULL);
     
-    printf("[Stream %d] Decoder initialized (%s)\n", 
-           stream->stream_id, decoder_backend_name(config.backend));
+    printf("[Stream %d] Decoder initialized (%s, codec=%s, chroma=%u, bitdepth=%u, fmt=0x%x)\n",
+           stream->stream_id, decoder_backend_name(config.backend),
+           codec_name_from_stream_info(&stream->info),
+           stream->info.chroma, stream->info.bitdepth, stream->info.video_format);
 
-    /* 如果启用了 SHM，尽早创建共享内存（在 STREAM_START 后就能让下游打开）
-     * 格式(NV12/YUV420P)可能在运行时变化(硬解/软解)，shm 采用最大 4:2:0 容量并在 publish 时写实际布局。
-     */
-    if (stream->shm_enabled && !stream->shm_opened && stream->info_received) {
-        char shm_name[128];
-        snprintf(shm_name, sizeof(shm_name), "/stream_server_stream_%02d", stream->stream_id);
-        if (shm_frame_writer_open(&stream->shm_writer, shm_name,
-                                  (uint32_t)stream->info.width, (uint32_t)stream->info.height) == 0) {
-            stream->shm_opened = true;
-            printf("[Stream %d] SHM created: %s (%ux%u)\n",
-                   stream->stream_id, shm_name, stream->info.width, stream->info.height);
-        }
-    }
-    
     pthread_mutex_unlock(&stream->lock);
     return 0;
 }
@@ -251,12 +365,6 @@ void stream_close_decoder(StreamContext* stream) {
     }
     stream->decoder_initialized = false;
 
-    /* 关闭 SHM（可选） */
-    if (stream->shm_opened) {
-        shm_frame_writer_close(&stream->shm_writer);
-        stream->shm_opened = false;
-    }
-    
     pthread_mutex_unlock(&stream->lock);
 }
 
@@ -302,29 +410,6 @@ int stream_decode_video(StreamContext* stream, const uint8_t* data, int size) {
         }
         stream->last_frame = frame;
 
-        /* 可选：更新内置 ZMQ bridge 的“紧凑 NV12 最新帧缓存”。
-         * 该函数在未启用内置 bridge 时是低成本 no-op。
-         */
-        zmq_bridge_on_new_frame(stream->stream_id, frame);
-
-        /* 可选：按需发布到共享内存（下游请求时才 memcpy） */
-        if (stream->shm_enabled) {
-            if (!stream->shm_opened) {
-                /* shm 名称可按 stream_id 区分 */
-                char shm_name[128];
-                snprintf(shm_name, sizeof(shm_name), "/stream_server_stream_%02d", stream->stream_id);
-
-                if (shm_frame_writer_open(&stream->shm_writer, shm_name,
-                                          (uint32_t)frame->width, (uint32_t)frame->height) == 0) {
-                    stream->shm_opened = true;
-                    printf("[Stream %d] SHM enabled: %s (%dx%d)\n",
-                           stream->stream_id, shm_name, frame->width, frame->height);
-                }
-            }
-            if (stream->shm_opened) {
-                (void)shm_frame_writer_maybe_publish(&stream->shm_writer, frame);
-            }
-        }
     } else if (ret < 0) {
         stream->decode_stats.frames_dropped++;
     }
@@ -355,36 +440,6 @@ DecodedFrame* stream_get_last_frame(StreamContext* stream) {
     pthread_mutex_unlock(&stream->lock);
     
     return frame;
-}
-
-int stream_get_last_frame_bgr(StreamContext* stream, DecodedFrame* bgr_frame) {
-    if (!stream || !bgr_frame) return -1;
-    
-    pthread_mutex_lock(&stream->lock);
-    
-    /* 检查是否有最后一帧 */
-    if (!stream->last_frame || !stream->decoder_ctx) {
-        pthread_mutex_unlock(&stream->lock);
-        return -1;
-    }
-    
-    /* 使用 decoder_convert_format 转换 NV12 -> BGRA */
-    DecoderCtx* dec_ctx = (DecoderCtx*)stream->decoder_ctx;
-    int ret = decoder_convert_format(dec_ctx, stream->last_frame, bgr_frame, DECODE_FMT_BGRA);
-    
-    pthread_mutex_unlock(&stream->lock);
-    return ret;
-}
-
-void stream_free_bgr_frame(DecodedFrame* frame) {
-    if (!frame) return;
-    
-    /* BGR 帧只有 data[0] */
-    if (frame->data[0]) {
-        free(frame->data[0]);
-        frame->data[0] = NULL;
-    }
-    /* 注意：frame 本身是调用方分配的，不用这里释放 */
 }
 
 /* ========== 压力测试功能实现（多线程并行解码） ========== */

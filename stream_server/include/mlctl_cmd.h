@@ -9,6 +9,7 @@
 
 #define ML_CTRL_MAGIC   0x4d4c4354u   /* "MLCT" */
 #define ML_CTRL_VERSION 1u
+#define ML_CTRL_CMD_REQ_IDR 10u
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -22,4 +23,3 @@ typedef struct __attribute__((packed)) {
 } MlControlCmd;
 
 #endif /* MLCTL_CMD_H */
-

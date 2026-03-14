@@ -1,8 +1,7 @@
-"""Simple perf client for ZMQ NV12 endpoints.
+"""Simple perf client for ZMQ BGR24 endpoints.
 
 Works with:
-- python_dir/shm_zmq_bridge.py (GET_LATEST_NV12 / GET_SHM_NV12)
-- stream_server embedded ZMQ bridge (GET_LATEST_NV12)
+- stream_server embedded ZMQ bridge (GET_LATEST_BGR)
 
 It measures:
 - avg request/response wall time per frame
@@ -28,8 +27,8 @@ def main() -> int:
     ap.add_argument("--timeout-ms", type=int, default=1000)
     ap.add_argument(
         "--cmd",
-        choices=["GET_LATEST_NV12", "GET_SHM_NV12"],
-        default="GET_LATEST_NV12",
+        choices=["GET_LATEST_BGR"],
+        default="GET_LATEST_BGR",
         help="which cmd to use",
     )
     args = ap.parse_args()
@@ -96,4 +95,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

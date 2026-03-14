@@ -42,10 +42,12 @@ int protocol_parse_header(const uint8_t* buf, PacketHeader* header) {
     return 0;
 }
 
-int protocol_parse_stream_info(const uint8_t* buf, StreamInfo* info) {
-    if (!buf || !info) {
+int protocol_parse_stream_info(const uint8_t* buf, size_t len, StreamInfo* info) {
+    if (!buf || !info || len < 16) {
         return -1;
     }
+
+    memset(info, 0, sizeof(*info));
 
     /* 逐字节读取，避免未对齐访问 */
     info->width   = ((uint32_t)buf[0]  << 24) | ((uint32_t)buf[1]  << 16)
@@ -56,6 +58,33 @@ int protocol_parse_stream_info(const uint8_t* buf, StreamInfo* info) {
                   | ((uint32_t)buf[10] <<  8) |  (uint32_t)buf[11];
     info->bitrate = ((uint32_t)buf[12] << 24) | ((uint32_t)buf[13] << 16)
                   | ((uint32_t)buf[14] <<  8) |  (uint32_t)buf[15];
+
+    if (len >= 32) {
+        info->codec = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16)
+                    | ((uint32_t)buf[18] <<  8) |  (uint32_t)buf[19];
+        info->chroma = ((uint32_t)buf[20] << 24) | ((uint32_t)buf[21] << 16)
+                     | ((uint32_t)buf[22] <<  8) |  (uint32_t)buf[23];
+        info->bitdepth = ((uint32_t)buf[24] << 24) | ((uint32_t)buf[25] << 16)
+                       | ((uint32_t)buf[26] <<  8) |  (uint32_t)buf[27];
+        info->video_format = ((uint32_t)buf[28] << 24) | ((uint32_t)buf[29] << 16)
+                           | ((uint32_t)buf[30] <<  8) |  (uint32_t)buf[31];
+        if (len >= 40) {
+            info->color_space = ((uint32_t)buf[32] << 24) | ((uint32_t)buf[33] << 16)
+                              | ((uint32_t)buf[34] <<  8) |  (uint32_t)buf[35];
+            info->color_range = ((uint32_t)buf[36] << 24) | ((uint32_t)buf[37] << 16)
+                              | ((uint32_t)buf[38] <<  8) |  (uint32_t)buf[39];
+        } else {
+            info->color_space = 0;
+            info->color_range = 0;
+        }
+    } else {
+        info->codec = 0;
+        info->chroma = 0;
+        info->bitdepth = 8;
+        info->video_format = 0;
+        info->color_space = 0;
+        info->color_range = 0;
+    }
     
     return 0;
 }

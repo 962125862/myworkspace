@@ -25,6 +25,7 @@
 #include "protocol.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <libavcodec/codec_id.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,7 +46,8 @@ typedef enum {
     DECODE_FMT_NONE = 0,
     DECODE_FMT_NV12,               /* YUV420 semi-planar (硬解默认输出) */
     DECODE_FMT_YUV420P,            /* YUV420 planar (软解默认输出) */
-    DECODE_FMT_BGRA,               /* BGRA 32bit (YOLO 推理输入) */
+    DECODE_FMT_YUV444P,            /* YUV444 planar */
+    DECODE_FMT_BGRA,               /* BGRA 32bit */
     DECODE_FMT_RGB24               /* RGB 24bit */
 } DecodeFormat;
 
@@ -62,7 +64,7 @@ typedef enum {
  */
 typedef struct {
     void* av_frame;              /* AVFrame* (零拷贝时非空，由解码器管理) */
-    uint8_t* data[4];            /* 平面数据指针 (Y/U/V/A 或 BGRA) */
+    uint8_t* data[4];            /* 平面数据指针 (Y/U/V/A 或 packed BGRA) */
     int linesize[4];             /* 每行字节数 (含对齐 padding) */
     int width;                   /* 帧宽度 (像素) */
     int height;                  /* 帧高度 (像素) */
@@ -77,6 +79,7 @@ typedef struct {
 /** 解码器创建参数 */
 typedef struct {
     DecodeBackend backend;       /* 后端类型 (AUTO 会自动检测) */
+    enum AVCodecID codec_id;     /* H264 / HEVC / AV1 */
     int width;                   /* 视频宽度 */
     int height;                  /* 视频高度 */
     DecodeFormat output_format;  /* 期望输出格式 */
@@ -155,8 +158,8 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame);
 void decoder_free_frame(DecodedFrame* frame);
 
 /**
- * @brief 像素格式转换 (目前仅支持 NV12 -> BGRA)
- * @note  使用 FFmpeg swscale，适合低频率调用（如 5fps YOLO 推理）
+ * @brief 像素格式转换 (当前支持 NV12/YUV420P/YUV444P -> BGRA)
+ * @note  使用 FFmpeg swscale，适合低频率或工具型调用
  */
 int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
                            DecodedFrame* dst, DecodeFormat target_format);

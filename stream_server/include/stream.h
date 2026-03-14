@@ -9,7 +9,7 @@
  *   - 流元信息 (StreamInfo: 分辨率/帧率/码率)
  *   - 独立的解码器实例 (DecoderCtx)
  *   - 解码统计 (FPS/延迟/丢帧)
- *   - 最后一帧缓存 (供下游 YOLO 推理使用)
+ *   - 最后一帧缓存 (供按需导出/桥接使用)
  *
  * 流管理器 (StreamManager) 维护固定大小的流数组 (MAX_STREAMS)，
  * 并提供压力测试功能: 将一路实时流复制到 N 个虚拟流并行解码。
@@ -25,7 +25,6 @@
 
 #include "protocol.h"
 #include "decoder.h"
-#include "shm_frame.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
@@ -88,12 +87,8 @@ typedef struct {
     void* decoder_ctx;             /* DecoderCtx* (不透明指针) */
     StreamDecodeStats decode_stats;/* 解码性能统计 */
     bool decoder_initialized;      /* 解码器是否已初始化 */
-    DecodedFrame* last_frame;      /* 最后解码帧 (供 YOLO 推理使用) */
-
-    /* 共享内存发布 (可选) */
-    bool shm_enabled;              /* 是否启用 SHM 发布（由 env 控制，lazy open） */
-    bool shm_opened;               /* 是否已经创建并 mmap shm */
-    ShmFrameWriter shm_writer;     /* 每路流一个 shm writer */
+    DecodedFrame* last_frame;      /* 最后解码帧缓存 */
+    uint64_t last_idr_request_ns;  /* 主链路自动 REQ_IDR 限频时间戳 */
 
     /* 线程安全 */
     pthread_mutex_t lock;          /* 保护本结构所有字段 */
@@ -209,17 +204,6 @@ void stream_get_decode_stats(StreamContext* stream, StreamDecodeStats* stats);
  * @note 返回的帧由 stream 管理，调用方不得释放!
  */
 DecodedFrame* stream_get_last_frame(StreamContext* stream);
-
-/**
- * @brief 获取最后一帧的 BGRA 格式副本 (用于 YOLO 推理)
- * @param bgr_frame 调用方提供的帧结构，data[0] 由函数内分配
- * @return 0 成功，-1 失败
- * @note 调用方需调用 stream_free_bgr_frame() 释放 data[0]
- */
-int stream_get_last_frame_bgr(StreamContext* stream, DecodedFrame* bgr_frame);
-
-/** 释放 stream_get_last_frame_bgr() 分配的 BGRA 数据 */
-void stream_free_bgr_frame(DecodedFrame* frame);
 
 /* ==================== 压力测试 API ==================== */
 

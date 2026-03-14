@@ -1,8 +1,7 @@
-"""DEALER client: fetch NV12 over ZMQ, save one PNG, then benchmark for N seconds.
+"""DEALER client: fetch BGR24 over ZMQ, save one PNG, then benchmark for N seconds.
 
 Works with:
-- python_dir/shm_zmq_bridge.py (GET_LATEST_NV12/GET_SHM_NV12)
-- stream_server embedded ZMQ bridge (GET_LATEST_NV12)
+- stream_server embedded ZMQ bridge (GET_LATEST_BGR)
 
 It will:
 1) fetch one frame and save PNG (OpenCV)
@@ -20,23 +19,12 @@ import json
 import time
 
 
-def nv12_to_bgr(w: int, h: int, y: bytes, uv: bytes):
-    import numpy as np  # type: ignore
-    import cv2  # type: ignore
-
-    y_arr = np.frombuffer(y, dtype=np.uint8).reshape((h, w))
-    uv_arr = np.frombuffer(uv, dtype=np.uint8).reshape((h // 2, w))
-    nv12 = np.vstack([y_arr, uv_arr])
-    bgr = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
-    return bgr
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--addr", default="tcp://127.0.0.1:5566")
     ap.add_argument("--stream-id", type=int, default=1)
     ap.add_argument("--timeout-ms", type=int, default=1000)
-    ap.add_argument("--cmd", choices=["GET_LATEST_NV12", "GET_SHM_NV12"], default="GET_LATEST_NV12")
+    ap.add_argument("--cmd", choices=["GET_LATEST_BGR"], default="GET_LATEST_BGR")
     ap.add_argument("--out", default="/tmp/frame.png")
     ap.add_argument("--duration-sec", type=float, default=60.0)
     ap.add_argument("--report-every", type=int, default=5)
@@ -67,15 +55,14 @@ def main() -> int:
         if not resp or resp[0] != b"OK":
             raise RuntimeError(b" ".join(resp).decode("utf-8", errors="replace") if resp else "no resp")
         meta = json.loads(resp[1].decode("utf-8"))
-        y = resp[2]
-        uv = resp[3]
-        return (t1 - t0) * 1000.0, meta, y, uv
+        bgr = resp[2]
+        return (t1 - t0) * 1000.0, meta, bgr
 
     # 1) save png (warm up: tolerate initial "no cached frame yet")
     last_err = None
     for _ in range(50):
         try:
-            rtt_ms, meta, y, uv = fetch_one()
+            rtt_ms, meta, bgr = fetch_one()
             break
         except Exception as e:
             last_err = e
@@ -84,8 +71,9 @@ def main() -> int:
         raise SystemExit(f"failed to fetch first frame: {last_err}")
     w = int(meta["width"])
     h = int(meta["height"])
-    bgr = nv12_to_bgr(w, h, y, uv)
-    ok = cv2.imwrite(args.out, bgr)
+    import numpy as np  # type: ignore
+    bgr_img = np.frombuffer(bgr, dtype=np.uint8).reshape((h, w, 3))
+    ok = cv2.imwrite(args.out, bgr_img)
     if not ok:
         raise SystemExit(f"cv2.imwrite failed: {args.out}")
     print(f"saved png: {args.out} ({w}x{h}) first_rtt_ms={rtt_ms:.3f}")
@@ -103,7 +91,7 @@ def main() -> int:
     while time.time() < end:
         n += 1
         try:
-            rtt_ms, meta, y, uv = fetch_one()
+            rtt_ms, meta, _ = fetch_one()
         except Exception:
             continue
         ok_n += 1

@@ -83,33 +83,6 @@ container_state() {
     fi
 }
 
-shm_file_from_name() {
-    local shm_name="$1"
-    printf '/dev/shm/%s\n' "${shm_name#/}"
-}
-
-remove_shm_file() {
-    local shm_file="$1"
-
-    [[ -e "$shm_file" ]] || return 0
-
-    log "清理 stale shm: $shm_file"
-
-    rm -f "$shm_file" 2>/dev/null || true
-
-    if [[ -e "$shm_file" ]] && command -v sudo >/dev/null 2>&1; then
-        sudo rm -f "$shm_file" 2>/dev/null || true
-    fi
-
-    if [[ -e "$shm_file" ]]; then
-        err "无法删除 shm 文件: $shm_file"
-        err "请手动执行: sudo rm -f '$shm_file'"
-        return 1
-    fi
-
-    return 0
-}
-
 key_files_state() {
     if [[ -f "$KEY_DIR/client.pem" && -f "$KEY_DIR/key.pem" && -f "$KEY_DIR/uniqueid.dat" ]]; then
         echo "YES"
@@ -129,6 +102,17 @@ write_worker_config() {
     local stream_id="${8:-}"
     local control_bind="${9:-127.0.0.1}"
     local control_port="${10:-}"
+    local width="${11:-1280}"
+    local height="${12:-720}"
+    local fps="${13:-60}"
+    local bitrate="${14:-10000}"
+    local packet_size="${15:-1024}"
+    local colorspace="${16:-709}"
+    local range="${17:-limited}"
+    local codec="${18:-h264}"
+    local chroma="${19:-420}"
+    local bitdepth="${20:-8}"
+    local skip_mode_check="${21:-1}"
 
     mkdir -p "$WORKERS_DIR" "$DATA_DIR/$name/keys"
 
@@ -179,11 +163,31 @@ TCP_PORT="$tcp_port"
 STREAM_ID="$stream_id"
 CONTROL_BIND="$control_bind"
 CONTROL_PORT="$control_port"
+WIDTH="$width"
+HEIGHT="$height"
+FPS="$fps"
+BITRATE="$bitrate"
+PACKET_SIZE="$packet_size"
+COLORSPACE="$colorspace"
+RANGE="$range"
+CODEC="$codec"
+CHROMA="$chroma"
+BITDEPTH="$bitdepth"
+SKIP_MODE_CHECK="$skip_mode_check"
 EOF
 
     log "已创建 worker 配置: $(worker_config_path "$name")"
     log "data 目录: $DATA_DIR/$name"
     log "推流目标: $tcp_host:$tcp_port (Stream ID: $stream_id)"
+}
+
+prompt_with_default() {
+    local __var_name="$1"
+    local prompt="$2"
+    local default_value="$3"
+    local input
+    read -rp "$prompt [$default_value]: " input
+    printf -v "$__var_name" '%s' "${input:-$default_value}"
 }
 
 create_worker_interactive() {
@@ -219,12 +223,10 @@ create_worker_interactive() {
     fi
 
     local app
-    read -rp "App [Desktop]: " app
-    app="${app:-Desktop}"
+    prompt_with_default app "App" "Desktop"
 
     local image
-    read -rp "Docker image [$DEFAULT_IMAGE]: " image
-    image="${image:-$DEFAULT_IMAGE}"
+    prompt_with_default image "Docker image" "$DEFAULT_IMAGE"
 
     local worker_bin
     if [[ -n "$DEFAULT_WORKER_BIN" ]]; then
@@ -239,27 +241,56 @@ create_worker_interactive() {
     echo
     log "TCP推流目标配置"
     local tcp_host
-    read -rp "推流目标地址 [127.0.0.1]: " tcp_host
-    tcp_host="${tcp_host:-127.0.0.1}"
+    prompt_with_default tcp_host "推流目标地址" "127.0.0.1"
 
     local tcp_port
-    read -rp "推流目标端口 [9000]: " tcp_port
-    tcp_port="${tcp_port:-9000}"
+    prompt_with_default tcp_port "推流目标端口" "9000"
 
     local stream_id
-    read -rp "Stream ID [1]: " stream_id
-    stream_id="${stream_id:-1}"
+    prompt_with_default stream_id "Stream ID" "1"
 
     echo
     log "控制端口配置（用于 REQ_IDR/鼠标键盘注入，ml_worker UDP socket）"
     local control_bind
-    read -rp "CONTROL_BIND [127.0.0.1]: " control_bind
-    control_bind="${control_bind:-127.0.0.1}"
+    prompt_with_default control_bind "CONTROL_BIND" "127.0.0.1"
     local control_port
-    read -rp "CONTROL_PORT [50001]: " control_port
-    control_port="${control_port:-50001}"
+    prompt_with_default control_port "CONTROL_PORT" "50001"
 
-    write_worker_config "$name" "$host" "$app" "$image" "$worker_bin" "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port"
+    echo
+    log "视频参数配置"
+    echo "  宽高/fps/码率会直接影响 Sunshine 编码负载、带宽和后续解码开销。"
+    local width height fps bitrate packet_size
+    prompt_with_default width "WIDTH 编码宽度" "1280"
+    prompt_with_default height "HEIGHT 编码高度" "720"
+    prompt_with_default fps "FPS 帧率" "60"
+    prompt_with_default bitrate "BITRATE 码率(kbps)" "10000"
+    prompt_with_default packet_size "PACKET_SIZE 单包大小(bytes)" "1024"
+
+    echo
+    log "色彩参数配置"
+    echo "  COLORSPACE 推荐 709；RANGE 选 full 可保留完整范围，limited 更传统。"
+    local colorspace range
+    prompt_with_default colorspace "COLORSPACE (709/601)" "709"
+    prompt_with_default range "RANGE (full/limited)" "limited"
+
+    echo
+    log "编码参数配置"
+    echo "  444 场景推荐 hevc + 444 + 8bit；通用兼容场景推荐 h264 + 420 + 8bit。"
+    local codec chroma bitdepth skip_mode_check
+    prompt_with_default codec "CODEC (h264/hevc)" "h264"
+    prompt_with_default chroma "CHROMA (420/444)" "420"
+    prompt_with_default bitdepth "BITDEPTH (8/10)" "8"
+
+    echo
+    log "兼容性参数"
+    echo "  SKIP_MODE_CHECK=1 会跳过 Sunshine supported modes 校验，部分机器必须打开。"
+    prompt_with_default skip_mode_check "SKIP_MODE_CHECK (1/0)" "1"
+
+    write_worker_config \
+        "$name" "$host" "$app" "$image" "$worker_bin" \
+        "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port" \
+        "$width" "$height" "$fps" "$bitrate" "$packet_size" \
+        "$colorspace" "$range" "$codec" "$chroma" "$bitdepth" "$skip_mode_check"
 
     printf '\n'
     log "创建完成:"
@@ -267,6 +298,7 @@ create_worker_interactive() {
     log "  host=$host"
     log "  app=$app"
     log "  image=$image"
+    log "  video=${width}x${height}@${fps} bitrate=${bitrate} codec=$codec/$chroma/$bitdepth colorspace=$colorspace range=$range"
     return 0
 }
 
@@ -281,6 +313,17 @@ create_worker_noninteractive() {
     local stream_id="${8:-}"
     local control_bind="${9:-127.0.0.1}"
     local control_port="${10:-}"
+    local width="${11:-1280}"
+    local height="${12:-720}"
+    local fps="${13:-60}"
+    local bitrate="${14:-10000}"
+    local packet_size="${15:-1024}"
+    local colorspace="${16:-709}"
+    local range="${17:-limited}"
+    local codec="${18:-h264}"
+    local chroma="${19:-420}"
+    local bitdepth="${20:-8}"
+    local skip_mode_check="${21:-1}"
 
     if [[ -z "$name" || -z "$host" ]]; then
         err "create_worker_noninteractive: name/host 不能为空"
@@ -292,7 +335,11 @@ create_worker_noninteractive() {
         return 1
     fi
 
-    write_worker_config "$name" "$host" "$app" "$image" "$worker_bin" "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port"
+    write_worker_config \
+        "$name" "$host" "$app" "$image" "$worker_bin" \
+        "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port" \
+        "$width" "$height" "$fps" "$bitrate" "$packet_size" \
+        "$colorspace" "$range" "$codec" "$chroma" "$bitdepth" "$skip_mode_check"
 }
 
 ensure_worker_or_create() {
@@ -322,8 +369,8 @@ load_worker() {
         return 1
     }
 
-    unset NAME HOST APP IMAGE WORKER_BIN KEY_DIR SHM_NAME CONTROL_BIND CONTROL_PORT
-    unset WIDTH HEIGHT FPS BITRATE PACKET_SIZE COLORSPACE RANGE SKIP_MODE_CHECK
+    unset NAME HOST APP IMAGE WORKER_BIN KEY_DIR CONTROL_BIND CONTROL_PORT
+    unset WIDTH HEIGHT FPS BITRATE PACKET_SIZE COLORSPACE RANGE CODEC CHROMA BITDEPTH SKIP_MODE_CHECK
     unset CONTAINER_NAME
 
     # shellcheck disable=SC1090
@@ -348,8 +395,6 @@ load_worker() {
     fi
 
     KEY_DIR="${KEY_DIR:-$DATA_DIR/$NAME/keys}"
-    SHM_NAME="${SHM_NAME:-/ml_stream_$suffix}"
-
     CONTROL_BIND="${CONTROL_BIND:-127.0.0.1}"
     if [[ -z "${CONTROL_PORT:-}" ]]; then
         if [[ -n "$idx_str" ]]; then
@@ -380,6 +425,9 @@ load_worker() {
     PACKET_SIZE="${PACKET_SIZE:-${ML_WORKER_DEFAULT_PACKET_SIZE:-1024}}"
     COLORSPACE="${COLORSPACE:-${ML_WORKER_DEFAULT_COLORSPACE:-709}}"
     RANGE="${RANGE:-${ML_WORKER_DEFAULT_RANGE:-limited}}"
+    CODEC="${CODEC:-${ML_WORKER_DEFAULT_CODEC:-h264}}"
+    CHROMA="${CHROMA:-${ML_WORKER_DEFAULT_CHROMA:-420}}"
+    BITDEPTH="${BITDEPTH:-${ML_WORKER_DEFAULT_BITDEPTH:-8}}"
     # Skip Sunshine "supported modes" validation by default. Some Sunshine setups
     # (e.g. certain VMs) don't report modes, but streaming still works.
     SKIP_MODE_CHECK="${SKIP_MODE_CHECK:-${ML_WORKER_DEFAULT_SKIP_MODE_CHECK:-1}}"
@@ -398,10 +446,6 @@ build_cmd_prefix() {
     if [[ -n "$WORKER_BIN" ]]; then
         CMD_PREFIX+=("$WORKER_BIN")
     fi
-}
-
-current_shm_file() {
-    shm_file_from_name "$SHM_NAME"
 }
 
 pair_worker() {
@@ -483,10 +527,6 @@ up_worker() {
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
 
-    local shm_file
-    shm_file="$(current_shm_file)"
-    remove_shm_file "$shm_file" || return 1
-
     if [[ "$(key_files_state)" != "YES" ]]; then
         log "警告: key 文件还不完整，建议先 pair"
     fi
@@ -509,6 +549,9 @@ up_worker() {
         --packet-size "$PACKET_SIZE"
         --colorspace "$COLORSPACE"
         --range "$RANGE"
+        --codec "$CODEC"
+        --chroma "$CHROMA"
+        --bitdepth "$BITDEPTH"
     )
     if [[ "${SKIP_MODE_CHECK:-0}" != "0" && "${SKIP_MODE_CHECK,,}" != "false" ]]; then
         cmd+=(--skip-mode-check)
@@ -526,7 +569,7 @@ up_worker() {
         "${cmd[@]}" >/dev/null
 
     log "stream 已启动: $CONTAINER_NAME"
-    log "host=$HOST app=$APP tcp=$TCP_HOST:$TCP_PORT stream_id=$STREAM_ID control=$CONTROL_BIND:$CONTROL_PORT"
+    log "host=$HOST app=$APP tcp=$TCP_HOST:$TCP_PORT stream_id=$STREAM_ID control=$CONTROL_BIND:$CONTROL_PORT codec=$CODEC chroma=$CHROMA bitdepth=$BITDEPTH"
 }
 
 ensure_up_worker() {
@@ -574,9 +617,6 @@ down_worker() {
         log "容器不存在: $CONTAINER_NAME"
     fi
 
-    local shm_file
-    shm_file="$(current_shm_file)"
-    remove_shm_file "$shm_file" || true
 }
 
 stop_soft_worker() {
@@ -600,9 +640,6 @@ stop_soft_worker() {
         log "容器不存在: $CONTAINER_NAME"
     fi
 
-    local shm_file
-    shm_file="$(current_shm_file)"
-    remove_shm_file "$shm_file" || true
 }
 
 restart_worker() {
@@ -643,14 +680,8 @@ status_worker() {
     local kstate
     kstate="$(key_files_state)"
 
-    local shm_file
-    shm_file="$(current_shm_file)"
-
-    local shm_state="NO"
-    [[ -e "$shm_file" ]] && shm_state="YES"
-
-    printf '%-10s  state=%-8s  host=%-15s  app=%-18s  keys=%-3s  tcp=%s:%s  ctrl=%-5s  key_dir=%s\n' \
-        "$NAME" "$cstate" "$HOST" "$APP" "$kstate" "$TCP_HOST" "$TCP_PORT" "$CONTROL_BIND:$CONTROL_PORT" "$KEY_DIR"
+    printf '%-10s  state=%-8s  host=%-15s  app=%-18s  keys=%-3s  tcp=%s:%s  ctrl=%-15s  video=%s/%s/%s  key_dir=%s\n' \
+        "$NAME" "$cstate" "$HOST" "$APP" "$kstate" "$TCP_HOST" "$TCP_PORT" "$CONTROL_BIND:$CONTROL_PORT" "$CODEC" "$CHROMA" "$BITDEPTH" "$KEY_DIR"
 }
 
 status_all() {
@@ -769,6 +800,7 @@ worker_menu() {
         echo "key_dir=$KEY_DIR"
         echo "tcp=$TCP_HOST:$TCP_PORT (stream_id=$STREAM_ID)"
         echo "control=$CONTROL_BIND:$CONTROL_PORT"
+        echo "video=$CODEC/$CHROMA/$BITDEPTH colorspace=$COLORSPACE range=$RANGE"
         echo
         echo "1) pair"
         echo "2) pair + up"
@@ -884,7 +916,8 @@ usage() {
 
   $0 add
   $0 add worker00 192.168.11.50 [Desktop]
-  $0 add worker00 192.168.11.50 Desktop [image] [worker_bin] [tcp_host] [tcp_port] [stream_id]
+  $0 add worker00 192.168.11.50 Desktop [image] [worker_bin] [tcp_host] [tcp_port] [stream_id] [control_bind] [control_port]
+  $0 add worker00 192.168.11.50 Desktop [image] [worker_bin] [tcp_host] [tcp_port] [stream_id] [control_bind] [control_port] [width] [height] [fps] [bitrate] [packet_size] [colorspace] [range] [codec] [chroma] [bitdepth] [skip_mode_check]
 
   $0 status
   $0 status worker00
@@ -910,7 +943,7 @@ usage() {
 - pair-up   : pair 成功后自动启动 stream
 - up/down   : 启停长期 stream 容器
 - ensure-up : 若容器已运行则不做任何事；若容器存在但已停止则 start；否则创建并启动
-- stop-soft : 只 stop 容器但不删除（下次 ensure-up 可快速 start），并清理 shm
+- stop-soft : 只 stop 容器但不删除（下次 ensure-up 可快速 start）
 - logs      : 查看 stream 容器日志
 - delete    : 删除 worker 配置，并可选删除数据目录
 
@@ -918,12 +951,35 @@ usage() {
 - 使用 TCP 推流（替代了原来的共享内存）
 - 支持推流到本地、局域网其他机器或公网服务器
 - 每个 worker 可配置独立的推流目标地址和端口
-- 可用 Python 接收端接收流: python3 python_dir/tcp_receiver_v2.py --port 9000 --save output.h264
+- 当前主链路推荐对接 stream_server 内置 ZMQ BGR bridge
 
 推流地址配置:
 - 交互式创建: 会提示输入推流目标地址、端口和 Stream ID
+- 交互式创建: 会提示输入推流地址/端口/Stream ID、控制端口、宽高、FPS、码率、色彩空间、色域范围、编码格式等
 - 配置文件: 编辑 deploy/workers/worker00.conf 修改 TCP_HOST/TCP_PORT/STREAM_ID
 - 命令行: ./deploy/mlctl.sh add worker00 192.168.11.50 Desktop "" "" 192.168.1.100 9000 1
+
+视频参数配置:
+- 配置文件中可设置 WIDTH/HEIGHT/FPS/BITRATE/PACKET_SIZE
+- 颜色参数可设置 COLORSPACE/RANGE
+- 编码参数可设置 CODEC/CHROMA/BITDEPTH
+- 交互创建时会显示默认值与说明:
+  - WIDTH=1280, HEIGHT=720, FPS=60
+  - BITRATE=10000, PACKET_SIZE=1024
+  - COLORSPACE=709, RANGE=limited
+  - CODEC=h264, CHROMA=420, BITDEPTH=8
+  - SKIP_MODE_CHECK=1
+- 也可通过环境变量统一设置默认值:
+  - ML_WORKER_DEFAULT_WIDTH
+  - ML_WORKER_DEFAULT_HEIGHT
+  - ML_WORKER_DEFAULT_FPS
+  - ML_WORKER_DEFAULT_BITRATE
+  - ML_WORKER_DEFAULT_PACKET_SIZE
+  - ML_WORKER_DEFAULT_COLORSPACE
+  - ML_WORKER_DEFAULT_RANGE
+  - ML_WORKER_DEFAULT_CODEC
+  - ML_WORKER_DEFAULT_CHROMA
+  - ML_WORKER_DEFAULT_BITDEPTH
 
 默认目录:
 - workers 配置目录: $WORKERS_DIR
@@ -950,7 +1006,11 @@ main() {
             ;;
         add|new|create)
             if [[ $# -ge 3 ]]; then
-                create_worker_noninteractive "$2" "$3" "${4:-Desktop}"
+                create_worker_noninteractive \
+                    "$2" "$3" "${4:-Desktop}" "${5:-$DEFAULT_IMAGE}" "${6:-$DEFAULT_WORKER_BIN}" \
+                    "${7:-127.0.0.1}" "${8:-}" "${9:-}" "${10:-127.0.0.1}" "${11:-}" \
+                    "${12:-1280}" "${13:-720}" "${14:-60}" "${15:-10000}" "${16:-1024}" \
+                    "${17:-709}" "${18:-limited}" "${19:-h264}" "${20:-420}" "${21:-8}" "${22:-1}"
             else
                 create_worker_interactive "${2:-}"
             fi

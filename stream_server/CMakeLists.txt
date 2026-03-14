@@ -36,6 +36,24 @@ else()
     message(STATUS "libzmq not found - builtin ZMQ bridge disabled")
 endif()
 
+# Optional: libyuv (ZMQ BGR output)
+find_path(LIBYUV_INCLUDE_DIR
+    NAMES libyuv.h libyuv/convert_argb.h
+    PATHS /usr/include /usr/local/include
+)
+find_library(LIBYUV_LIBRARY
+    NAMES yuv libyuv
+    PATHS /usr/lib /usr/lib64 /usr/local/lib /lib/x86_64-linux-gnu
+)
+if(LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY)
+    message(STATUS "libyuv found - BGR conversion enabled")
+    list(APPEND HWACCEL_DEFS HAVE_LIBYUV)
+    list(APPEND HWACCEL_LIBS ${LIBYUV_LIBRARY})
+    list(APPEND HWACCEL_INCLUDES ${LIBYUV_INCLUDE_DIR})
+else()
+    message(STATUS "libyuv not found - ZMQ BGR output disabled")
+endif()
+
 # 检测 CUDA Toolkit 头文件路径 (hwcontext_cuda.h 需要 cuda.h)
 set(CUDA_SEARCH_PATHS
     /usr/local/cuda/include
@@ -112,7 +130,6 @@ set(SOURCES
     src/stream.c
     src/server.c
     src/decoder.c
-    src/shm_frame.c
     src/h264_tap.c
     src/zmq_bridge.c
 )

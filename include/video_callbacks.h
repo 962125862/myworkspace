@@ -16,6 +16,12 @@ typedef struct {
     uint32_t height;
     uint32_t fps;
     uint32_t bitrate;
+    uint32_t video_format;
+    uint32_t codec;
+    uint32_t chroma;
+    uint32_t bitdepth;
+    uint32_t color_space;
+    uint32_t color_range;
 
     /* 错误码指针 */
     volatile int* fatal_code;

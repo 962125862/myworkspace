@@ -5,7 +5,7 @@
  * 功能概览：
  * - 作为“推流端”：连接 Sunshine/NVIDIA GameStream 主机，启动指定 app 的串流
  * - 通过 Moonlight embedded (Limelight) 的回调拿到编码后的 H.264 bytestream
- * - 使用自定义 TLV 协议经 TCP 推送到 stream_server（接收端负责解码/共享内存发布/旁路桥接）
+ * - 使用自定义 TLV 协议经 TCP 推送到 stream_server（接收端负责解码和按需桥接）
  * - 可选启用控制通道：监听 UDP 控制包，将鼠标/键盘/文本事件注入到串流会话
  */
 
@@ -84,6 +84,11 @@ typedef struct {
 
     /* If true, skip server mode validation (useful when Sunshine doesn't report modes). */
     bool skip_mode_check;
+
+    int codec;
+    int chroma;
+    int bitdepth;
+    bool codec_explicit;
 } StreamOptions;
 
 typedef struct {
@@ -96,6 +101,147 @@ typedef struct {
     const char* host;
     const char* key_dir;
 } ListOptions;
+
+enum {
+    STREAM_CODEC_H264 = 0,
+    STREAM_CODEC_HEVC = 1,
+    STREAM_CODEC_AV1 = 2,
+};
+
+enum {
+    STREAM_CHROMA_420 = 0,
+    STREAM_CHROMA_444 = 1,
+};
+
+static const char* stream_codec_name(int codec) {
+    switch (codec) {
+        case STREAM_CODEC_H264: return "h264";
+        case STREAM_CODEC_HEVC: return "hevc";
+        case STREAM_CODEC_AV1:  return "av1";
+        default:                return "unknown";
+    }
+}
+
+static const char* stream_chroma_name(int chroma) {
+    switch (chroma) {
+        case STREAM_CHROMA_420: return "420";
+        case STREAM_CHROMA_444: return "444";
+        default:                return "unknown";
+    }
+}
+
+static int parse_codec_arg(const char* s, int* out_codec) {
+    if (!s || !out_codec) {
+        return -1;
+    }
+
+    if (!strcasecmp(s, "h264")) {
+        *out_codec = STREAM_CODEC_H264;
+        return 0;
+    }
+    if (!strcasecmp(s, "h265") || !strcasecmp(s, "hevc")) {
+        *out_codec = STREAM_CODEC_HEVC;
+        return 0;
+    }
+    if (!strcasecmp(s, "av1")) {
+        *out_codec = STREAM_CODEC_AV1;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int parse_chroma_arg(const char* s, int* out_chroma) {
+    if (!s || !out_chroma) {
+        return -1;
+    }
+
+    if (!strcmp(s, "420")) {
+        *out_chroma = STREAM_CHROMA_420;
+        return 0;
+    }
+    if (!strcmp(s, "444")) {
+        *out_chroma = STREAM_CHROMA_444;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int parse_bitdepth_arg(const char* s, int* out_bitdepth) {
+    if (!s || !out_bitdepth) {
+        return -1;
+    }
+
+    if (!strcmp(s, "8")) {
+        *out_bitdepth = 8;
+        return 0;
+    }
+    if (!strcmp(s, "10")) {
+        *out_bitdepth = 10;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int build_supported_video_formats(const StreamOptions* opt, int* out_mask) {
+    if (!opt || !out_mask) {
+        return -1;
+    }
+
+    switch (opt->codec) {
+        case STREAM_CODEC_H264:
+            if (opt->bitdepth != 8) {
+                fprintf(stderr, "invalid codec profile: h264 only supports 8-bit in current SDK\n");
+                return -1;
+            }
+            *out_mask = (opt->chroma == STREAM_CHROMA_444)
+                      ? VIDEO_FORMAT_H264_HIGH8_444
+                      : VIDEO_FORMAT_H264;
+            return 0;
+
+        case STREAM_CODEC_HEVC:
+            if (opt->chroma == STREAM_CHROMA_444) {
+                *out_mask = (opt->bitdepth == 10)
+                          ? VIDEO_FORMAT_H265_REXT10_444
+                          : VIDEO_FORMAT_H265_REXT8_444;
+            } else {
+                *out_mask = (opt->bitdepth == 10)
+                          ? VIDEO_FORMAT_H265_MAIN10
+                          : VIDEO_FORMAT_H265;
+            }
+            return 0;
+
+        case STREAM_CODEC_AV1:
+            if (opt->chroma == STREAM_CHROMA_444) {
+                *out_mask = (opt->bitdepth == 10)
+                          ? VIDEO_FORMAT_AV1_HIGH10_444
+                          : VIDEO_FORMAT_AV1_HIGH8_444;
+            } else {
+                *out_mask = (opt->bitdepth == 10)
+                          ? VIDEO_FORMAT_AV1_MAIN10
+                          : VIDEO_FORMAT_AV1_MAIN8;
+            }
+            return 0;
+
+        default:
+            return -1;
+    }
+}
+
+static void apply_default_codec_policy(StreamOptions* opt) {
+    if (!opt) {
+        return;
+    }
+    if (!opt->codec_explicit &&
+        opt->chroma == STREAM_CHROMA_444 &&
+        opt->codec == STREAM_CODEC_H264) {
+        opt->codec = STREAM_CODEC_HEVC;
+        fprintf(stderr,
+                "[ml_worker] chroma=444 without explicit codec, defaulting to HEVC for compatibility\n");
+    }
+}
 
 static void on_signal(int sig) {
     (void)sig;
@@ -267,6 +413,10 @@ static void stream_options_defaults(StreamOptions* o) {
     o->control_port = 0;
     /* Default ON: Sunshine may not report modes on some setups (e.g. VM). */
     o->skip_mode_check = true;
+    o->codec = STREAM_CODEC_H264;
+    o->chroma = STREAM_CHROMA_420;
+    o->bitdepth = 8;
+    o->codec_explicit = false;
 }
 
 static void pair_options_defaults(PairOptions* o) {
@@ -299,6 +449,9 @@ static void print_usage(const char* argv0) {
             "  --packet-size <n>         default: 1024\n"
             "  --colorspace <601|709>    default: 709\n"
             "  --range <limited|full>    default: limited\n"
+            "  --codec <h264|hevc|av1>   default: h264 (auto-switch to hevc when chroma=444 unless explicitly set)\n"
+            "  --chroma <420|444>        default: 420\n"
+            "  --bitdepth <8|10>         default: 8\n"
             "  --skip-mode-check         default: on (allow starting even if server doesn't report modes)\n"
             "  --enforce-mode-check      force server mode validation (may fail if server doesn't report modes)\n"
             "  --control-bind <ip>       default: 127.0.0.1\n"
@@ -416,6 +569,22 @@ static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
                     fprintf(stderr, "invalid --range\n");
                     return -1;
                 }
+            } else if (!strcmp(argv[i], "--codec") && i + 1 < argc) {
+                if (parse_codec_arg(argv[++i], &o->codec) != 0) {
+                    fprintf(stderr, "invalid --codec\n");
+                    return -1;
+                }
+                o->codec_explicit = true;
+            } else if (!strcmp(argv[i], "--chroma") && i + 1 < argc) {
+                if (parse_chroma_arg(argv[++i], &o->chroma) != 0) {
+                    fprintf(stderr, "invalid --chroma\n");
+                    return -1;
+                }
+            } else if (!strcmp(argv[i], "--bitdepth") && i + 1 < argc) {
+                if (parse_bitdepth_arg(argv[++i], &o->bitdepth) != 0) {
+                    fprintf(stderr, "invalid --bitdepth\n");
+                    return -1;
+                }
             } else if (!strcmp(argv[i], "--skip-mode-check")) {
                 o->skip_mode_check = true;
             } else if (!strcmp(argv[i], "--enforce-mode-check")) {
@@ -448,6 +617,13 @@ static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
 
     if (o->control_port < 0 || o->control_port > 65535) {
         fprintf(stderr, "invalid --control-port\n");
+        return -1;
+    }
+
+    apply_default_codec_policy(o);
+
+    int supported_video_formats = 0;
+    if (build_supported_video_formats(o, &supported_video_formats) != 0) {
         return -1;
     }
 
@@ -531,12 +707,21 @@ static int run_stream_command(const StreamOptions* opt) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    StreamOptions effective = *opt;
+    apply_default_codec_policy(&effective);
+
+    int supported_video_formats = 0;
+    if (build_supported_video_formats(&effective, &supported_video_formats) != 0) {
+        return 1;
+    }
+
     fprintf(stderr,
-            "options: host=%s app=%s tcp=%s:%d stream_id=%u %dx%d@%d bitrate=%d key_dir=%s control=%s:%d skip_mode_check=%d\n",
-            opt->host, opt->app, opt->tcp_host, opt->tcp_port, opt->stream_id,
-            opt->width, opt->height, opt->fps, opt->bitrate,
-            opt->key_dir, opt->control_bind, opt->control_port,
-            opt->skip_mode_check ? 1 : 0);
+            "options: host=%s app=%s tcp=%s:%d stream_id=%u %dx%d@%d bitrate=%d key_dir=%s control=%s:%d skip_mode_check=%d codec=%s chroma=%s bitdepth=%d\n",
+            effective.host, effective.app, effective.tcp_host, effective.tcp_port, effective.stream_id,
+            effective.width, effective.height, effective.fps, effective.bitrate,
+            effective.key_dir, effective.control_bind, effective.control_port,
+            effective.skip_mode_check ? 1 : 0,
+            stream_codec_name(effective.codec), stream_chroma_name(effective.chroma), effective.bitdepth);
 
     SERVER_DATA server;
     memset(&server, 0, sizeof(server));
@@ -544,24 +729,31 @@ static int run_stream_command(const StreamOptions* opt) {
     STREAM_CONFIGURATION streamConfig;
     LiInitializeStreamConfiguration(&streamConfig);
 
-    streamConfig.width = opt->width;
-    streamConfig.height = opt->height;
-    streamConfig.fps = opt->fps;
-    streamConfig.bitrate = opt->bitrate;
-    streamConfig.packetSize = opt->packet_size;
+    streamConfig.width = effective.width;
+    streamConfig.height = effective.height;
+    streamConfig.fps = effective.fps;
+    streamConfig.bitrate = effective.bitrate;
+    streamConfig.packetSize = effective.packet_size;
     streamConfig.streamingRemotely = STREAM_CFG_AUTO;
     streamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    streamConfig.supportedVideoFormats = VIDEO_FORMAT_H264;
+    streamConfig.supportedVideoFormats = supported_video_formats;
     streamConfig.clientRefreshRateX100 = 6000;
-    streamConfig.colorSpace = opt->ll_color_space;
-    streamConfig.colorRange = opt->ll_color_range;
+    streamConfig.colorSpace = effective.ll_color_space;
+    streamConfig.colorRange = effective.ll_color_range;
 
-    if (gs_init(&server, (char*)opt->host, 0, opt->key_dir, 1, opt->skip_mode_check) != 0) {
+    fprintf(stderr,
+            "[ml_worker] requesting video format mask=0x%x codec=%s chroma=%s bitdepth=%d\n",
+            supported_video_formats,
+            stream_codec_name(effective.codec),
+            stream_chroma_name(effective.chroma),
+            effective.bitdepth);
+
+    if (gs_init(&server, (char*)effective.host, 0, effective.key_dir, 1, effective.skip_mode_check) != 0) {
         fprintf(stderr, "gs_init failed: %s\n", gs_error ? gs_error : "(null)");
         return 2;
     }
     fprintf(stderr, "[ml_worker] gs_init: server.unsupported=%d (skip_mode_check=%d)\n",
-            server.unsupported ? 1 : 0, opt->skip_mode_check ? 1 : 0);
+            server.unsupported ? 1 : 0, effective.skip_mode_check ? 1 : 0);
 
     fprintf(stderr, "server appversion=%s codecSupport=0x%x paired=%d currentGame=%d http=%u https=%u\n",
             server.serverInfo.serverInfoAppVersion ? server.serverInfo.serverInfoAppVersion : "(null)",
@@ -571,14 +763,19 @@ static int run_stream_command(const StreamOptions* opt) {
             server.httpPort,
             server.httpsPort);
 
+    if (effective.codec != STREAM_CODEC_H264 || effective.chroma != STREAM_CHROMA_420 || effective.bitdepth != 8) {
+        fprintf(stderr,
+                "[ml_worker] note: negotiation includes codec/chroma/bitdepth metadata for downstream decode routing.\n");
+    }
+
     if (!server.paired) {
         fprintf(stderr, "host is not paired for this key directory\n");
         return 3;
     }
 
-    int app_id = resolve_app_id(&server, opt->app);
+    int app_id = resolve_app_id(&server, effective.app);
     if (app_id < 0) {
-        fprintf(stderr, "could not resolve app: %s\n", opt->app);
+        fprintf(stderr, "could not resolve app: %s\n", effective.app);
         return 4;
     }
 
@@ -593,7 +790,7 @@ static int run_stream_command(const StreamOptions* opt) {
         if (gs_rc == GS_NOT_SUPPORTED_MODE || gs_rc == GS_NOT_SUPPORTED_SOPS_RESOLUTION) {
             fprintf(stderr,
                     "[ml_worker] requested mode: %dx%d@%d\n",
-                    opt->width, opt->height, opt->fps);
+                    effective.width, effective.height, effective.fps);
             dump_server_modes(&server);
             fprintf(stderr,
                     "[ml_worker] hint: try a refresh rate that exists in the mode list (often 60), "
@@ -609,13 +806,19 @@ static int run_stream_command(const StreamOptions* opt) {
 
     WorkerRenderConfig render_cfg;
     memset(&render_cfg, 0, sizeof(render_cfg));
-    snprintf(render_cfg.tcp_host, sizeof(render_cfg.tcp_host), "%s", opt->tcp_host);
-    render_cfg.tcp_port = opt->tcp_port;
-    render_cfg.stream_id = opt->stream_id;
-    render_cfg.width = (uint32_t)opt->width;
-    render_cfg.height = (uint32_t)opt->height;
-    render_cfg.fps = (uint32_t)opt->fps;
-    render_cfg.bitrate = (uint32_t)opt->bitrate;
+    snprintf(render_cfg.tcp_host, sizeof(render_cfg.tcp_host), "%s", effective.tcp_host);
+    render_cfg.tcp_port = effective.tcp_port;
+    render_cfg.stream_id = effective.stream_id;
+    render_cfg.width = (uint32_t)effective.width;
+    render_cfg.height = (uint32_t)effective.height;
+    render_cfg.fps = (uint32_t)effective.fps;
+    render_cfg.bitrate = (uint32_t)effective.bitrate;
+    render_cfg.codec = (uint32_t)effective.codec;
+    render_cfg.chroma = (uint32_t)effective.chroma;
+    render_cfg.bitdepth = (uint32_t)effective.bitdepth;
+    render_cfg.video_format = (uint32_t)supported_video_formats;
+    render_cfg.color_space = (uint32_t)effective.ll_color_space;
+    render_cfg.color_range = (uint32_t)effective.ll_color_range;
     render_cfg.fatal_code = &fatal_code;
 
     connection_callbacks_set_fatal_code(&fatal_code);
@@ -640,8 +843,8 @@ static int run_stream_command(const StreamOptions* opt) {
     control_socket.fd = -1;
 
     int control_enabled = 0;
-    if (opt->control_port > 0) {
-        if (control_socket_open(&control_socket, opt->control_bind, (uint16_t)opt->control_port) != 0) {
+    if (effective.control_port > 0) {
+        if (control_socket_open(&control_socket, effective.control_bind, (uint16_t)effective.control_port) != 0) {
             fprintf(stderr, "control socket open failed\n");
             connection_callbacks_set_fatal_code(NULL);
             LiStopConnection();
@@ -656,7 +859,7 @@ static int run_stream_command(const StreamOptions* opt) {
 
     while (g_running) {
         if (control_enabled) {
-            control_socket_process_all(&control_socket, opt->width, opt->height);
+            control_socket_process_all(&control_socket, effective.width, effective.height);
         }
 
         if (fatal_code != WORKER_FATAL_NONE) {

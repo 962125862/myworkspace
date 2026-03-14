@@ -13,7 +13,7 @@
  *   - payload:   变长数据，具体含义取决于 type
  *
  * 消息类型:
- *   - STREAM_START (0x03): payload 为 StreamInfo（16字节: width/height/fps/bitrate）
+ *   - STREAM_START (0x03): payload 为 StreamInfo（兼容 16/32/40 字节）
  *   - VIDEO_DATA  (0x01): payload 为 H.264 NAL 单元原始数据
  *   - HEARTBEAT   (0x02): 保活消息，无 payload
  *   - STREAM_STOP  (0x04): 停止流，无 payload
@@ -56,13 +56,19 @@ extern "C" {
  * @brief 视频流信息（STREAM_START 消息的 payload）
  *
  * 由推流端（Docker ml_worker）在建立流时发送，告知接收端视频参数。
- * 所有字段均为大端序 uint32_t，共 16 字节。
+ * 所有字段均为大端序 uint32_t。
  */
 typedef struct {
     uint32_t width;     /* 视频宽度（像素） */
     uint32_t height;    /* 视频高度（像素） */
     uint32_t fps;       /* 帧率 */
     uint32_t bitrate;   /* 码率 (kbps) */
+    uint32_t codec;     /* 0=h264, 1=hevc, 2=av1 */
+    uint32_t chroma;    /* 0=420, 1=444 */
+    uint32_t bitdepth;  /* 8 / 10 */
+    uint32_t video_format; /* Limelight negotiated video format mask */
+    uint32_t color_space; /* Limelight color space enum */
+    uint32_t color_range; /* Limelight color range enum */
 } StreamInfo;
 
 /**
@@ -92,7 +98,7 @@ int protocol_parse_header(const uint8_t* buf, PacketHeader* header);
  * @param info 输出: 流信息（主机字节序）
  * @return 0 成功，-1 失败
  */
-int protocol_parse_stream_info(const uint8_t* buf, StreamInfo* info);
+int protocol_parse_stream_info(const uint8_t* buf, size_t len, StreamInfo* info);
 
 /**
  * @brief 构建协议包头（用于发送响应）

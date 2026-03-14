@@ -9,6 +9,7 @@
 #include "decoder.h"
 #include "stream.h"
 #include "h264_tap.h"
+#include "mlctl_cmd.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/time.h>
+#include <time.h>
 
 #define DEFAULT_RECV_BUF_SIZE (1024 * 1024)  /* 1MB接收缓冲区 */
 #define RECV_TIMEOUT_SEC 5
@@ -105,6 +107,83 @@ static int recv_exact(int fd, uint8_t* buf, size_t n) {
 static int g_stress_test_enabled = 0;
 static int g_stress_test_copies = 20;
 
+static uint64_t monotonic_ns_server(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int request_idr_best_effort_main_path(void) {
+    const char* wip = getenv("ML_WORKER_CTRL_IP");
+    const char* wport = getenv("ML_WORKER_CTRL_PORT");
+    if (!wip || !*wip || !wport || !*wport) {
+        return -1;
+    }
+
+    int port = atoi(wport);
+    if (port <= 0 || port > 65535) {
+        return -1;
+    }
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, wip, &a.sin_addr) != 1) {
+        close(fd);
+        return -1;
+    }
+
+    MlControlCmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.magic = ML_CTRL_MAGIC;
+    cmd.version = (uint16_t)ML_CTRL_VERSION;
+    cmd.type = (uint16_t)ML_CTRL_CMD_REQ_IDR;
+    cmd.seq = monotonic_ns_server();
+
+    int rc = (int)sendto(fd, &cmd, sizeof(cmd), 0, (struct sockaddr*)&a, sizeof(a));
+    close(fd);
+    return (rc == (int)sizeof(cmd)) ? 0 : -1;
+}
+
+static void maybe_request_idr_for_no_decode(StreamContext* stream) {
+    if (!stream) {
+        return;
+    }
+
+    const uint64_t now_ns = monotonic_ns_server();
+    const uint64_t request_interval_ns = 1000ull * 1000ull * 1000ull;
+    int should_request = 0;
+    uint64_t frames_received = 0;
+    uint64_t frames_decoded = 0;
+
+    pthread_mutex_lock(&stream->lock);
+    frames_received = stream->frames_received;
+    frames_decoded = stream->decode_stats.frames_decoded;
+    if (stream->state == STREAM_STATE_ACTIVE &&
+        stream->decoder_initialized &&
+        frames_decoded == 0 &&
+        frames_received >= 30 &&
+        (stream->last_idr_request_ns == 0 ||
+         now_ns - stream->last_idr_request_ns >= request_interval_ns)) {
+        stream->last_idr_request_ns = now_ns;
+        should_request = 1;
+    }
+    pthread_mutex_unlock(&stream->lock);
+
+    if (should_request && request_idr_best_effort_main_path() == 0) {
+        fprintf(stderr,
+                "[Server] Stream %u decoded=0 after %llu frames, requested upstream IDR\n",
+                stream->stream_id,
+                (unsigned long long)frames_received);
+    }
+}
+
 /* H264 tap */
 static int g_h264_tap_started = 0;
 static void maybe_start_h264_tap(void) {
@@ -169,9 +248,10 @@ static void handle_packet(TcpServer* server, ClientConn* client,
     
     switch (header->type) {
         case TCP_MSG_TYPE_STREAM_START:
-            if (header->length >= TCP_HEADER_SIZE + sizeof(StreamInfo)) {
+            if (header->length >= TCP_HEADER_SIZE + 16) {
                 StreamInfo info;
-                if (protocol_parse_stream_info(payload, &info) == 0) {
+                uint32_t payload_len = header->length - TCP_HEADER_SIZE;
+                if (protocol_parse_stream_info(payload, payload_len, &info) == 0) {
                     stream_set_info(stream, &info);
                     stream_set_state(stream, STREAM_STATE_ACTIVE);
                     client->current_stream_id = header->stream_id;
@@ -183,8 +263,10 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                                 header->stream_id);
                     }
                     
-                    printf("[Server] Stream %d started: %dx%d@%dfps\n",
-                           header->stream_id, info.width, info.height, info.fps);
+                    printf("[Server] Stream %d started: %dx%d@%dfps codec=%u chroma=%u bitdepth=%u fmt=0x%x cs=%u cr=%u\n",
+                           header->stream_id, info.width, info.height, info.fps,
+                           info.codec, info.chroma, info.bitdepth, info.video_format,
+                           info.color_space, info.color_range);
                     
                     /* 检查是否启用压力测试模式 */
                     if (g_stress_test_enabled == 0) {
@@ -238,6 +320,7 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                         last_error = now;
                     }
                 }
+                maybe_request_idr_for_no_decode(stream);
                 
                 /* 如果启用了压力测试，复制到虚拟流 */
                 if (g_stress_test_enabled) {

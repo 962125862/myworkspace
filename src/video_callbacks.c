@@ -46,6 +46,22 @@ static uint64_t g_stats_delay_samples = 0;
 static uint64_t g_last_reconnect_ns = 0;
 #define RECONNECT_INTERVAL_NS (3ULL * 1000000000ULL)
 
+static const char* video_format_name(int videoFormat) {
+    switch (videoFormat) {
+        case VIDEO_FORMAT_H264:            return "h264";
+        case VIDEO_FORMAT_H264_HIGH8_444:  return "h264_high8_444";
+        case VIDEO_FORMAT_H265:            return "hevc";
+        case VIDEO_FORMAT_H265_MAIN10:     return "hevc_main10";
+        case VIDEO_FORMAT_H265_REXT8_444:  return "hevc_rext8_444";
+        case VIDEO_FORMAT_H265_REXT10_444: return "hevc_rext10_444";
+        case VIDEO_FORMAT_AV1_MAIN8:       return "av1_main8";
+        case VIDEO_FORMAT_AV1_MAIN10:      return "av1_main10";
+        case VIDEO_FORMAT_AV1_HIGH8_444:   return "av1_high8_444";
+        case VIDEO_FORMAT_AV1_HIGH10_444:  return "av1_high10_444";
+        default:                           return "unknown";
+    }
+}
+
 static uint64_t now_monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -148,7 +164,6 @@ static int ensure_connected(void) {
 }
 
 static int worker_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
-    (void)videoFormat;
     (void)redrawRate;
     (void)drFlags;
 
@@ -171,10 +186,17 @@ static int worker_setup(int videoFormat, int width, int height, int redrawRate, 
     tcp_config.height = (uint32_t)height;
     tcp_config.fps = g_cfg->fps ? g_cfg->fps : 60;
     tcp_config.bitrate = g_cfg->bitrate ? g_cfg->bitrate : 10000;
+    tcp_config.codec = g_cfg->codec;
+    tcp_config.chroma = g_cfg->chroma;
+    tcp_config.bitdepth = g_cfg->bitdepth;
+    tcp_config.video_format = (uint32_t)videoFormat;
+    tcp_config.color_space = g_cfg->color_space;
+    tcp_config.color_range = g_cfg->color_range;
 
     /* 保存到全局配置 */
     g_cfg->width = (uint32_t)width;
     g_cfg->height = (uint32_t)height;
+    g_cfg->video_format = (uint32_t)videoFormat;
 
     /* 初始化TCP发送器 */
     if (tcp_sender_init(&g_tcp_sender, &tcp_config) < 0) {
@@ -191,9 +213,12 @@ static int worker_setup(int videoFormat, int width, int height, int redrawRate, 
         /* 不立即返回错误，允许后续重连 */
     }
 
-    fprintf(stderr, "video worker ready: stream_id=%u -> %s:%d (%dx%d@%u)\n",
+    fprintf(stderr,
+            "video worker ready: stream_id=%u -> %s:%d (%dx%d@%u) negotiated=%s(0x%x) yuv444=%d\n",
             tcp_config.stream_id, tcp_config.host, tcp_config.port,
-            width, height, tcp_config.fps);
+            width, height, tcp_config.fps,
+            video_format_name(videoFormat), videoFormat,
+            (videoFormat & VIDEO_FORMAT_MASK_YUV444) ? 1 : 0);
 
     g_stats_last_ns = now_monotonic_ns();
     g_stats_frames_received = 0;

@@ -378,8 +378,8 @@ int tcp_sender_send_stream_start(TcpSender* sender) {
         return -1;
     }
 
-    /* 构建流信息: width(4) + height(4) + fps(4) + bitrate(4) = 16字节 */
-    size_t payload_size = 16;
+    /* 构建流信息: 基础16字节 + codec/chroma/bitdepth/video_format/color = 40字节 */
+    size_t payload_size = 40;
     size_t total_size = TCP_HEADER_SIZE + payload_size;
 
     if (ensure_buffer_size(sender, total_size) < 0) {
@@ -418,6 +418,30 @@ int tcp_sender_send_stream_start(TcpSender* sender) {
     p[13] = (uint8_t)((sender->config.bitrate >> 16) & 0xFF);
     p[14] = (uint8_t)((sender->config.bitrate >> 8) & 0xFF);
     p[15] = (uint8_t)(sender->config.bitrate & 0xFF);
+    p[16] = (uint8_t)((sender->config.codec >> 24) & 0xFF);
+    p[17] = (uint8_t)((sender->config.codec >> 16) & 0xFF);
+    p[18] = (uint8_t)((sender->config.codec >> 8) & 0xFF);
+    p[19] = (uint8_t)(sender->config.codec & 0xFF);
+    p[20] = (uint8_t)((sender->config.chroma >> 24) & 0xFF);
+    p[21] = (uint8_t)((sender->config.chroma >> 16) & 0xFF);
+    p[22] = (uint8_t)((sender->config.chroma >> 8) & 0xFF);
+    p[23] = (uint8_t)(sender->config.chroma & 0xFF);
+    p[24] = (uint8_t)((sender->config.bitdepth >> 24) & 0xFF);
+    p[25] = (uint8_t)((sender->config.bitdepth >> 16) & 0xFF);
+    p[26] = (uint8_t)((sender->config.bitdepth >> 8) & 0xFF);
+    p[27] = (uint8_t)(sender->config.bitdepth & 0xFF);
+    p[28] = (uint8_t)((sender->config.video_format >> 24) & 0xFF);
+    p[29] = (uint8_t)((sender->config.video_format >> 16) & 0xFF);
+    p[30] = (uint8_t)((sender->config.video_format >> 8) & 0xFF);
+    p[31] = (uint8_t)(sender->config.video_format & 0xFF);
+    p[32] = (uint8_t)((sender->config.color_space >> 24) & 0xFF);
+    p[33] = (uint8_t)((sender->config.color_space >> 16) & 0xFF);
+    p[34] = (uint8_t)((sender->config.color_space >> 8) & 0xFF);
+    p[35] = (uint8_t)(sender->config.color_space & 0xFF);
+    p[36] = (uint8_t)((sender->config.color_range >> 24) & 0xFF);
+    p[37] = (uint8_t)((sender->config.color_range >> 16) & 0xFF);
+    p[38] = (uint8_t)((sender->config.color_range >> 8) & 0xFF);
+    p[39] = (uint8_t)(sender->config.color_range & 0xFF);
 
     if (send_all(sender->sock_fd, buf, total_size) < 0) {
         fprintf(stderr, "tcp_sender: stream_start send failed: %s\n", strerror(errno));
@@ -426,9 +450,12 @@ int tcp_sender_send_stream_start(TcpSender* sender) {
         return -1;
     }
 
-    fprintf(stderr, "tcp_sender: stream_start sent (stream_id=%u, %ux%u@%u, %u kbps)\n",
+    fprintf(stderr, "tcp_sender: stream_start sent (stream_id=%u, %ux%u@%u, %u kbps, codec=%u chroma=%u bitdepth=%u fmt=0x%x cs=%u cr=%u)\n",
             sender->config.stream_id, sender->config.width, sender->config.height,
-            sender->config.fps, sender->config.bitrate);
+            sender->config.fps, sender->config.bitrate,
+            sender->config.codec, sender->config.chroma,
+            sender->config.bitdepth, sender->config.video_format,
+            sender->config.color_space, sender->config.color_range);
 
     return 0;
 }

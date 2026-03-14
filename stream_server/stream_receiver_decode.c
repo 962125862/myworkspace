@@ -185,9 +185,9 @@ static int receiver_run(StreamReceiver* rec, int listen_port, int duration_sec) 
 
         /* 处理不同消息类型 */
         if (pkt_hdr.type == TCP_MSG_TYPE_STREAM_START) {
-            if (payload_len >= sizeof(StreamInfo)) {
+            if (payload_len >= 16) {
                 StreamInfo info;
-                protocol_parse_stream_info(rec->recv_buffer, &info);
+                protocol_parse_stream_info(rec->recv_buffer, payload_len, &info);
                 printf("[Receiver] Stream %u started: %ux%u@%u, %u kbps\n",
                        pkt_hdr.stream_id, info.width, info.height, info.fps, info.bitrate);
                 stream_started = 1;

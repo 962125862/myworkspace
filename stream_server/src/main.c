@@ -35,9 +35,7 @@ static void print_usage(const char* prog) {
     printf("  -v, --verbose         Verbose output\n");
     printf("\nOptional feature flags (prefer CLI over env):\n");
     printf("  --decode-backend <auto|intel|nvidia|cpu>\n");
-    printf("  --enable-shm          Enable SHM publishing (/dev/shm/stream_server_stream_XX)\n");
-    printf("  --shm-always          Always publish to SHM (ignore request_seq)\n");
-    printf("  --zmq-bridge-bind <addr>  Enable built-in ZMQ bridge, e.g. tcp://0.0.0.0:5566\n");
+    printf("  --zmq-bridge-bind <addr>  Enable built-in ZMQ BGR bridge, e.g. tcp://0.0.0.0:5566\n");
     printf("  --stress-test         Enable stress test mode/report\n");
     printf("  --stress-copies <n>   Stress test copies\n");
     printf("\nH264 tap (AnnexB H264 TCP output):\n");
@@ -66,8 +64,6 @@ int main(int argc, char* argv[]) {
      * NOTE: Internal modules still support env vars; CLI options override them.
      */
     char decode_backend[32] = {0};
-    int enable_shm = 0;
-    int shm_always = 0;
     char zmq_bridge_bind[256] = {0};
     int stress_test = 0;
     int stress_copies = 0;
@@ -87,8 +83,6 @@ int main(int argc, char* argv[]) {
         {"daemon", no_argument, 0, 'd'},
         {"verbose", no_argument, 0, 'v'},
         {"decode-backend", required_argument, 0, 1000},
-        {"enable-shm", no_argument, 0, 1001},
-        {"shm-always", no_argument, 0, 1002},
         {"zmq-bridge-bind", required_argument, 0, 1003},
         {"stress-test", no_argument, 0, 1004},
         {"stress-copies", required_argument, 0, 1005},
@@ -137,12 +131,6 @@ int main(int argc, char* argv[]) {
             case 1000: /* --decode-backend */
                 strncpy(decode_backend, optarg, sizeof(decode_backend) - 1);
                 break;
-            case 1001: /* --enable-shm */
-                enable_shm = 1;
-                break;
-            case 1002: /* --shm-always */
-                shm_always = 1;
-                break;
             case 1003: /* --zmq-bridge-bind */
                 strncpy(zmq_bridge_bind, optarg, sizeof(zmq_bridge_bind) - 1);
                 break;
@@ -182,12 +170,6 @@ int main(int argc, char* argv[]) {
      */
     if (decode_backend[0]) {
         setenv("DECODE_BACKEND", decode_backend, 1);
-    }
-    if (enable_shm) {
-        setenv("ENABLE_SHM", "1", 1);
-    }
-    if (shm_always) {
-        setenv("SHM_ALWAYS", "1", 1);
     }
     if (zmq_bridge_bind[0]) {
         setenv("ZMQ_BRIDGE_BIND", zmq_bridge_bind, 1);
@@ -237,7 +219,7 @@ int main(int argc, char* argv[]) {
     printf("Stats interval: %ds\n", stats_interval);
     printf("========================================\n\n");
 
-    /* 可选：启动内置 ZMQ bridge（ROUTER），用于对外提供 GET_LATEST_NV12。
+    /* 可选：启动内置 ZMQ bridge（ROUTER），用于对外提供 GET_LATEST_BGR。
      * 通过环境变量控制，避免改变默认行为。
      *   ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566
      */
