@@ -19,15 +19,46 @@
 #include <time.h>
 #include <Limelight.h>
 #include "client.h"
+#include "errors.h"
 
 #include "connection_callbacks.h"
 #include "video_callbacks.h"
 #include "worker_defs.h"
 #include "control_socket.h"
 
-extern char* gs_error;
+extern const char* gs_error;
 
 static volatile int g_running = 1;
+
+static const char* gs_rc_name(int rc) {
+    switch (rc) {
+        case GS_OK: return "GS_OK";
+        case GS_FAILED: return "GS_FAILED";
+        case GS_OUT_OF_MEMORY: return "GS_OUT_OF_MEMORY";
+        case GS_INVALID: return "GS_INVALID";
+        case GS_WRONG_STATE: return "GS_WRONG_STATE";
+        case GS_IO_ERROR: return "GS_IO_ERROR";
+        case GS_NOT_SUPPORTED_4K: return "GS_NOT_SUPPORTED_4K";
+        case GS_UNSUPPORTED_VERSION: return "GS_UNSUPPORTED_VERSION";
+        case GS_NOT_SUPPORTED_MODE: return "GS_NOT_SUPPORTED_MODE";
+        case GS_ERROR: return "GS_ERROR";
+        case GS_NOT_SUPPORTED_SOPS_RESOLUTION: return "GS_NOT_SUPPORTED_SOPS_RESOLUTION";
+        default: return "GS_<unknown>";
+    }
+}
+
+static void dump_server_modes(const SERVER_DATA* server) {
+    if (!server) return;
+    fprintf(stderr, "[ml_worker] server modes (width x height @ refresh):\n");
+    const PDISPLAY_MODE* mode = &server->modes;
+    if (!*mode) {
+        fprintf(stderr, "  (none)\n");
+        return;
+    }
+    for (PDISPLAY_MODE p = server->modes; p != NULL; p = p->next) {
+        fprintf(stderr, "  - %dx%d@%d\n", p->width, p->height, p->refresh);
+    }
+}
 
 typedef struct {
     const char* host;
@@ -50,6 +81,9 @@ typedef struct {
 
     const char* control_bind;
     int control_port;
+
+    /* If true, skip server mode validation (useful when Sunshine doesn't report modes). */
+    bool skip_mode_check;
 } StreamOptions;
 
 typedef struct {
@@ -231,6 +265,8 @@ static void stream_options_defaults(StreamOptions* o) {
 
     o->control_bind = "127.0.0.1";
     o->control_port = 0;
+    /* Default ON: Sunshine may not report modes on some setups (e.g. VM). */
+    o->skip_mode_check = true;
 }
 
 static void pair_options_defaults(PairOptions* o) {
@@ -263,6 +299,8 @@ static void print_usage(const char* argv0) {
             "  --packet-size <n>         default: 1024\n"
             "  --colorspace <601|709>    default: 709\n"
             "  --range <limited|full>    default: limited\n"
+            "  --skip-mode-check         default: on (allow starting even if server doesn't report modes)\n"
+            "  --enforce-mode-check      force server mode validation (may fail if server doesn't report modes)\n"
             "  --control-bind <ip>       default: 127.0.0.1\n"
             "  --control-port <port>     default: 0 (disabled)\n"
             "\n"
@@ -378,6 +416,10 @@ static int parse_stream_args(int argc, char** argv, StreamOptions* o) {
                     fprintf(stderr, "invalid --range\n");
                     return -1;
                 }
+            } else if (!strcmp(argv[i], "--skip-mode-check")) {
+                o->skip_mode_check = true;
+            } else if (!strcmp(argv[i], "--enforce-mode-check")) {
+                o->skip_mode_check = false;
             } else if (!strcmp(argv[i], "--control-bind") && i + 1 < argc) {
                 o->control_bind = argv[++i];
             } else if (!strcmp(argv[i], "--control-port") && i + 1 < argc) {
@@ -490,10 +532,11 @@ static int run_stream_command(const StreamOptions* opt) {
     signal(SIGTERM, on_signal);
 
     fprintf(stderr,
-            "options: host=%s app=%s tcp=%s:%d stream_id=%u %dx%d@%d bitrate=%d key_dir=%s control=%s:%d\n",
+            "options: host=%s app=%s tcp=%s:%d stream_id=%u %dx%d@%d bitrate=%d key_dir=%s control=%s:%d skip_mode_check=%d\n",
             opt->host, opt->app, opt->tcp_host, opt->tcp_port, opt->stream_id,
             opt->width, opt->height, opt->fps, opt->bitrate,
-            opt->key_dir, opt->control_bind, opt->control_port);
+            opt->key_dir, opt->control_bind, opt->control_port,
+            opt->skip_mode_check ? 1 : 0);
 
     SERVER_DATA server;
     memset(&server, 0, sizeof(server));
@@ -513,10 +556,12 @@ static int run_stream_command(const StreamOptions* opt) {
     streamConfig.colorSpace = opt->ll_color_space;
     streamConfig.colorRange = opt->ll_color_range;
 
-    if (gs_init(&server, (char*)opt->host, 0, opt->key_dir, 1, false) != 0) {
+    if (gs_init(&server, (char*)opt->host, 0, opt->key_dir, 1, opt->skip_mode_check) != 0) {
         fprintf(stderr, "gs_init failed: %s\n", gs_error ? gs_error : "(null)");
         return 2;
     }
+    fprintf(stderr, "[ml_worker] gs_init: server.unsupported=%d (skip_mode_check=%d)\n",
+            server.unsupported ? 1 : 0, opt->skip_mode_check ? 1 : 0);
 
     fprintf(stderr, "server appversion=%s codecSupport=0x%x paired=%d currentGame=%d http=%u https=%u\n",
             server.serverInfo.serverInfoAppVersion ? server.serverInfo.serverInfoAppVersion : "(null)",
@@ -539,9 +584,21 @@ static int run_stream_command(const StreamOptions* opt) {
 
     fprintf(stderr, "resolved app_id=%d\n", app_id);
 
-    if (gs_start_app(&server, &streamConfig, app_id, true, false, 0) != 0) {
-        fprintf(stderr, "gs_start_app failed for app_id=%d: %s\n",
-                app_id, gs_error ? gs_error : "(null)");
+    gs_error = NULL; /* some failure paths don't set it */
+    int gs_rc = gs_start_app(&server, &streamConfig, app_id, true, false, 0);
+    if (gs_rc != GS_OK) {
+        fprintf(stderr,
+                "gs_start_app failed for app_id=%d rc=%d(%s) err=%s\n",
+                app_id, gs_rc, gs_rc_name(gs_rc), gs_error ? gs_error : "(null)");
+        if (gs_rc == GS_NOT_SUPPORTED_MODE || gs_rc == GS_NOT_SUPPORTED_SOPS_RESOLUTION) {
+            fprintf(stderr,
+                    "[ml_worker] requested mode: %dx%d@%d\n",
+                    opt->width, opt->height, opt->fps);
+            dump_server_modes(&server);
+            fprintf(stderr,
+                    "[ml_worker] hint: try a refresh rate that exists in the mode list (often 60), "
+                    "or a different resolution.\n");
+        }
         return 5;
     }
 

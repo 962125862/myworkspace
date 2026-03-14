@@ -23,3 +23,6 @@ BITRATE="10000"
 PACKET_SIZE="1024"
 COLORSPACE="709"
 RANGE="limited"
+
+# Sunshine 可能不返回 supported modes（常见于部分 VM），默认建议跳过校验。
+SKIP_MODE_CHECK="1"

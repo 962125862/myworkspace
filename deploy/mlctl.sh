@@ -323,7 +323,7 @@ load_worker() {
     }
 
     unset NAME HOST APP IMAGE WORKER_BIN KEY_DIR SHM_NAME CONTROL_BIND CONTROL_PORT
-    unset WIDTH HEIGHT FPS BITRATE PACKET_SIZE COLORSPACE RANGE
+    unset WIDTH HEIGHT FPS BITRATE PACKET_SIZE COLORSPACE RANGE SKIP_MODE_CHECK
     unset CONTAINER_NAME
 
     # shellcheck disable=SC1090
@@ -380,6 +380,9 @@ load_worker() {
     PACKET_SIZE="${PACKET_SIZE:-${ML_WORKER_DEFAULT_PACKET_SIZE:-1024}}"
     COLORSPACE="${COLORSPACE:-${ML_WORKER_DEFAULT_COLORSPACE:-709}}"
     RANGE="${RANGE:-${ML_WORKER_DEFAULT_RANGE:-limited}}"
+    # Skip Sunshine "supported modes" validation by default. Some Sunshine setups
+    # (e.g. certain VMs) don't report modes, but streaming still works.
+    SKIP_MODE_CHECK="${SKIP_MODE_CHECK:-${ML_WORKER_DEFAULT_SKIP_MODE_CHECK:-1}}"
 
     CONTAINER_NAME="${CONTAINER_NAME:-mlw-$NAME}"
 
@@ -507,6 +510,9 @@ up_worker() {
         --colorspace "$COLORSPACE"
         --range "$RANGE"
     )
+    if [[ "${SKIP_MODE_CHECK:-0}" != "0" && "${SKIP_MODE_CHECK,,}" != "false" ]]; then
+        cmd+=(--skip-mode-check)
+    fi
 
     docker run -d \
         --user "$DOCKER_USER" \
