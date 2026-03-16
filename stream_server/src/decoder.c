@@ -66,12 +66,30 @@ struct DecoderCtx {
     /* 统计 */
     DecoderStats stats;
     double total_decode_time;
+    double total_hw_transfer_time;
 };
 
 static pthread_mutex_t g_cuda_device_mu = PTHREAD_MUTEX_INITIALIZER;
 static AVBufferRef* g_cuda_device_master = NULL;
 static int g_cuda_device_id = -1;
 static unsigned g_cuda_device_users = 0;
+
+static double elapsed_ms_since(const struct timespec* start,
+                               const struct timespec* end) {
+    return (end->tv_sec - start->tv_sec) * 1000.0 +
+           (end->tv_nsec - start->tv_nsec) / 1000000.0;
+}
+
+static void record_hw_transfer_time(DecoderCtx* ctx, double transfer_ms) {
+    if (!ctx) {
+        return;
+    }
+
+    ctx->stats.hw_transfer_count++;
+    ctx->total_hw_transfer_time += transfer_ms;
+    ctx->stats.avg_hw_transfer_time_ms =
+        ctx->total_hw_transfer_time / (double)ctx->stats.hw_transfer_count;
+}
 
 static const char* codec_name_from_id(enum AVCodecID codec_id) {
     switch (codec_id) {
@@ -576,6 +594,9 @@ int decoder_init(DecoderCtx* ctx, const uint8_t* extradata, int extradata_size) 
             /* 设置回调函数 (关键!) */
             ctx->codec_ctx->get_format = vaapi_get_format;
             ctx->codec_ctx->get_buffer2 = hw_get_buffer;
+            if (ctx->config.extra_hw_frames > 0) {
+                ctx->codec_ctx->extra_hw_frames = ctx->config.extra_hw_frames;
+            }
         }
     }
     else if (ctx->config.backend == DECODE_BACKEND_NVIDIA) {
@@ -602,13 +623,23 @@ int decoder_init(DecoderCtx* ctx, const uint8_t* extradata, int extradata_size) 
             ctx->codec_ctx->get_format = get_hw_format;
             ctx->codec_ctx->hw_device_ctx = av_buffer_ref(ctx->hw_device_ctx);
 
-            /* 额外帧池大小 (参考 moonlight-qt extra_hw_frames) */
-            ctx->codec_ctx->extra_hw_frames = 4;
+            /*
+             * 当 last_frame 保留为硬件帧时，需要更大的 surface 余量，
+             * 否则容易因为引用未释放而把 NVDEC 帧池顶满。
+             */
+            if (ctx->config.extra_hw_frames > 0) {
+                ctx->codec_ctx->extra_hw_frames = ctx->config.extra_hw_frames;
+            } else if (ctx->config.defer_hw_download) {
+                ctx->codec_ctx->extra_hw_frames = 24;
+            } else {
+                ctx->codec_ctx->extra_hw_frames = 8;
+            }
 
             /* 硬件解码不需要多线程 */
             ctx->codec_ctx->thread_count = 1;
 
-            printf("[Decoder] NVIDIA CUDA device created (GPU %d)\n", ctx->config.cuda_device_id);
+            printf("[Decoder] NVIDIA CUDA device created (GPU %d, extra_hw_frames=%d)\n",
+                   ctx->config.cuda_device_id, ctx->codec_ctx->extra_hw_frames);
         }
     }
     
@@ -799,13 +830,17 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                         continue;
                     }
 
+                    struct timespec xfer_start, xfer_end;
+                    clock_gettime(CLOCK_MONOTONIC, &xfer_start);
                     ret = av_hwframe_transfer_data(tmp_frame, ctx->frame, 0);
+                    clock_gettime(CLOCK_MONOTONIC, &xfer_end);
                     if (ret < 0) {
                         av_frame_free(&tmp_frame);
                         free(frame);
                         ctx->stats.frames_dropped++;
                         continue;
                     }
+                    record_hw_transfer_time(ctx, elapsed_ms_since(&xfer_start, &xfer_end));
 
                     av_frame_copy_props(tmp_frame, ctx->frame);
                     out_avf = tmp_frame;
@@ -832,8 +867,7 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
     }
     
     clock_gettime(CLOCK_MONOTONIC, &end_ts);
-    double decode_time = (end_ts.tv_sec - start_ts.tv_sec) * 1000.0 + 
-                         (end_ts.tv_nsec - start_ts.tv_nsec) / 1000000.0;
+    double decode_time = elapsed_ms_since(&start_ts, &end_ts);
     ctx->total_decode_time += decode_time;
     if (ctx->stats.frames_decoded > 0) {
         ctx->stats.avg_decode_time_ms = ctx->total_decode_time / ctx->stats.frames_decoded;
@@ -930,11 +964,16 @@ int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame)
         return -1;
     }
 
+    struct timespec xfer_start, xfer_end;
+    clock_gettime(CLOCK_MONOTONIC, &xfer_start);
     int ret = av_hwframe_transfer_data(sw_frame, hw_frame, 0);
+    clock_gettime(CLOCK_MONOTONIC, &xfer_end);
     if (ret < 0) {
         av_frame_free(&sw_frame);
         return -1;
     }
+    record_hw_transfer_time((DecoderCtx*)src->_decoder_ctx,
+                            elapsed_ms_since(&xfer_start, &xfer_end));
     av_frame_copy_props(sw_frame, hw_frame);
 
     DecodedFrame* dst = calloc(1, sizeof(*dst));
@@ -993,11 +1032,15 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
                 free(frame);
                 return -1;
             }
+            struct timespec xfer_start, xfer_end;
+            clock_gettime(CLOCK_MONOTONIC, &xfer_start);
             if (av_hwframe_transfer_data(tmp_frame, ctx->frame, 0) < 0) {
                 av_frame_free(&tmp_frame);
                 free(frame);
                 return -1;
             }
+            clock_gettime(CLOCK_MONOTONIC, &xfer_end);
+            record_hw_transfer_time(ctx, elapsed_ms_since(&xfer_start, &xfer_end));
             av_frame_copy_props(tmp_frame, ctx->frame);
             out_avf = tmp_frame;
             take_ownership = true;

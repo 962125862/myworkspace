@@ -147,11 +147,46 @@ static bool stream_defer_hw_download_enabled(void) {
     static int cached = -1;
 
     if (cached < 0) {
-        cached = parse_bool_env_enabled("STREAM_DEFER_HW_DOWNLOAD", false) ? 1 : 0;
+        cached = parse_bool_env_enabled("STREAM_DEFER_HW_DOWNLOAD", true) ? 1 : 0;
         printf("[Stream] STREAM_DEFER_HW_DOWNLOAD=%s\n", cached ? "on" : "off");
     }
 
     return cached == 1;
+}
+
+static int parse_int_env_clamped(const char* name, int default_value,
+                                 int min_value, int max_value) {
+    const char* value = getenv(name);
+    if (!value || !*value) {
+        return default_value;
+    }
+
+    char* end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || (end && *end != '\0')) {
+        return default_value;
+    }
+
+    if (parsed < min_value) {
+        return min_value;
+    }
+    if (parsed > max_value) {
+        return max_value;
+    }
+    return (int)parsed;
+}
+
+static int stream_nvdec_extra_hw_frames(void) {
+    static int cached = -1;
+
+    if (cached < 0) {
+        const int default_frames = stream_defer_hw_download_enabled() ? 24 : 8;
+        cached = parse_int_env_clamped("STREAM_NVDEC_EXTRA_HW_FRAMES",
+                                       default_frames, 0, 128);
+        printf("[Stream] STREAM_NVDEC_EXTRA_HW_FRAMES=%d\n", cached);
+    }
+
+    return cached;
 }
 
 int stream_manager_init(StreamManager* mgr) {
@@ -277,9 +312,12 @@ void stream_manager_print_stats(StreamManager* mgr) {
             
             /* 显示解码统计 */
             if (stream->decoder_initialized) {
-                printf(", Decoded: %lu, FPS: %.1f",
+                printf(", Decoded: %lu, FPS: %.1f, Dec: %.3f ms, Xfer: %.3f ms (%lu)",
                        stream->decode_stats.frames_decoded,
-                       stream->decode_stats.current_fps);
+                       stream->decode_stats.current_fps,
+                       stream->decode_stats.avg_decode_time_ms,
+                       stream->decode_stats.avg_hw_transfer_time_ms,
+                       stream->decode_stats.hw_transfer_count);
             }
             printf("\n");
             
@@ -321,7 +359,8 @@ int stream_init_decoder(StreamContext* stream, int backend) {
         .thread_count = 2,
         .va_device = "/dev/dri/renderD128",
         .cuda_device_id = 0,
-        .defer_hw_download = stream_defer_hw_download_enabled()
+        .defer_hw_download = stream_defer_hw_download_enabled(),
+        .extra_hw_frames = stream_nvdec_extra_hw_frames()
     };
     
     DecoderCtx* ctx = NULL;
@@ -454,7 +493,9 @@ int stream_decode_video(StreamContext* stream, const uint8_t* data, int size) {
     DecoderStats dec_stats;
     decoder_get_stats(ctx, &dec_stats);
     stream->decode_stats.avg_decode_time_ms = dec_stats.avg_decode_time_ms;
-    
+    stream->decode_stats.hw_transfer_count = dec_stats.hw_transfer_count;
+    stream->decode_stats.avg_hw_transfer_time_ms = dec_stats.avg_hw_transfer_time_ms;
+
     pthread_mutex_unlock(&stream->lock);
     
     return ret;

@@ -94,6 +94,7 @@ typedef struct {
     char va_device[64];          /* VA-API 设备路径 (如 /dev/dri/renderD128) */
     int cuda_device_id;          /* NVIDIA GPU 设备 ID (通常为 0) */
     bool defer_hw_download;      /* true: last_frame 保留硬件帧，按需下载 */
+    int extra_hw_frames;         /* NVDEC/VAAPI 额外硬件帧池余量 */
 } DecoderConfig;
 
 /* ==================== 解码器上下文 ==================== */
@@ -188,6 +189,8 @@ typedef struct {
     uint64_t frames_dropped;     /* 丢弃帧数 (错误/分配失败) */
     uint64_t bytes_in;           /* 输入字节总量 */
     double avg_decode_time_ms;   /* 平均每帧解码耗时 (ms) */
+    uint64_t hw_transfer_count;  /* av_hwframe_transfer_data() 次数 */
+    double avg_hw_transfer_time_ms; /* 平均每次下载耗时 (ms) */
 } DecoderStats;
 
 void decoder_get_stats(DecoderCtx* ctx, DecoderStats* stats);

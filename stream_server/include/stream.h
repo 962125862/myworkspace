@@ -52,6 +52,8 @@ typedef struct {
     uint64_t frames_decoded;        /* 累计解码帧数 */
     uint64_t frames_dropped;        /* 累计丢帧数 */
     double avg_decode_time_ms;      /* 平均解码耗时 (ms/frame) */
+    uint64_t hw_transfer_count;     /* GPU->CPU 下载次数 */
+    double avg_hw_transfer_time_ms; /* 平均每次下载耗时 (ms) */
     double current_fps;             /* 当前实时 FPS (每秒更新) */
     time_t last_fps_calc_time;      /* 上次 FPS 计算时刻 */
     uint64_t last_frames_decoded;   /* 上次计算时的累计帧数 */
