@@ -183,43 +183,72 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
 
     *out = NULL;
 
+    DecodedFrame* snapshot = NULL;
+    StreamInfo info_snapshot;
+    uint16_t stream_id = 0;
+
     pthread_mutex_lock(&stream->lock);
     DecodedFrame* lf = stream->last_frame;
     if (!lf || lf->width <= 0 || lf->height <= 0) {
         pthread_mutex_unlock(&stream->lock);
         return -1;
     }
+    snapshot = decoder_ref_frame(lf);
+    if (snapshot) {
+        info_snapshot = stream->info;
+        stream_id = stream->stream_id;
+    }
+    pthread_mutex_unlock(&stream->lock);
 
-    ZmqBgrFrame* frame = (ZmqBgrFrame*)calloc(1, sizeof(*frame));
-    if (!frame) {
-        pthread_mutex_unlock(&stream->lock);
+    if (!snapshot) {
         return -1;
     }
 
-    frame->stream_id = stream->stream_id;
-    frame->width = lf->width;
-    frame->height = lf->height;
-    frame->stride = lf->width * 3;
-    frame->pts = lf->pts;
-    frame->key_frame = lf->key_frame ? 1 : 0;
+    DecodedFrame* cpu_frame = snapshot;
+    if (snapshot->storage == DECODE_STORAGE_HW) {
+        if (decoder_materialize_frame(snapshot, &cpu_frame) != 0) {
+            decoder_free_frame(snapshot);
+            return -1;
+        }
+    }
+
+    ZmqBgrFrame* frame = (ZmqBgrFrame*)calloc(1, sizeof(*frame));
+    if (!frame) {
+        if (cpu_frame != snapshot) {
+            decoder_free_frame(cpu_frame);
+        }
+        decoder_free_frame(snapshot);
+        return -1;
+    }
+
+    frame->stream_id = stream_id;
+    frame->width = cpu_frame->width;
+    frame->height = cpu_frame->height;
+    frame->stride = cpu_frame->width * 3;
+    frame->pts = cpu_frame->pts;
+    frame->key_frame = cpu_frame->key_frame ? 1 : 0;
     frame->mono_ns = monotonic_ns();
-    frame->color_space = stream->info.color_space;
-    frame->color_range = stream->info.color_range;
+    frame->color_space = info_snapshot.color_space;
+    frame->color_range = info_snapshot.color_range;
     frame->bgr_sz = (size_t)frame->stride * (size_t)frame->height;
     frame->bgr = (uint8_t*)malloc(frame->bgr_sz);
     if (!frame->bgr) {
-        pthread_mutex_unlock(&stream->lock);
+        if (cpu_frame != snapshot) {
+            decoder_free_frame(cpu_frame);
+        }
+        decoder_free_frame(snapshot);
         free(frame);
         return -1;
     }
 
-    const struct YuvConstants* yuv_constants = bgr_yuv_constants_from_info(&stream->info);
+    const struct YuvConstants* yuv_constants = bgr_yuv_constants_from_info(&info_snapshot);
+    const int cpu_format = cpu_frame->format;
     int ret = -1;
-    switch (lf->format) {
+    switch (cpu_frame->format) {
         case DECODE_FMT_NV12:
             ret = NV12ToRGB24Matrix(
-                lf->data[0], lf->linesize[0],
-                lf->data[1], lf->linesize[1],
+                cpu_frame->data[0], cpu_frame->linesize[0],
+                cpu_frame->data[1], cpu_frame->linesize[1],
                 frame->bgr, frame->stride,
                 yuv_constants,
                 frame->width, frame->height);
@@ -227,9 +256,9 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
 
         case DECODE_FMT_YUV420P:
             ret = I420ToRGB24Matrix(
-                lf->data[0], lf->linesize[0],
-                lf->data[1], lf->linesize[1],
-                lf->data[2], lf->linesize[2],
+                cpu_frame->data[0], cpu_frame->linesize[0],
+                cpu_frame->data[1], cpu_frame->linesize[1],
+                cpu_frame->data[2], cpu_frame->linesize[2],
                 frame->bgr, frame->stride,
                 yuv_constants,
                 frame->width, frame->height);
@@ -237,9 +266,9 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
 
         case DECODE_FMT_YUV444P:
             ret = I444ToRGB24Matrix(
-                lf->data[0], lf->linesize[0],
-                lf->data[1], lf->linesize[1],
-                lf->data[2], lf->linesize[2],
+                cpu_frame->data[0], cpu_frame->linesize[0],
+                cpu_frame->data[1], cpu_frame->linesize[1],
+                cpu_frame->data[2], cpu_frame->linesize[2],
                 frame->bgr, frame->stride,
                 yuv_constants,
                 frame->width, frame->height);
@@ -250,7 +279,10 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
             break;
     }
 
-    pthread_mutex_unlock(&stream->lock);
+    if (cpu_frame != snapshot) {
+        decoder_free_frame(cpu_frame);
+    }
+    decoder_free_frame(snapshot);
 
     if (ret != 0) {
         free_bgr_frame(frame);
@@ -260,10 +292,10 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
     static int color_log_count = 0;
     if (color_log_count++ < 4) {
         printf("[ZMQ] stream %u BGR conversion using %s/%s (fmt=%d)\n",
-               stream->stream_id,
-               color_space_name(stream->info.color_space),
-               color_range_name(stream->info.color_range),
-               lf->format);
+               stream_id,
+               color_space_name(info_snapshot.color_space),
+               color_range_name(info_snapshot.color_range),
+               cpu_format);
     }
 
     *out = frame;

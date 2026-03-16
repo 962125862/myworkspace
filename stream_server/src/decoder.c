@@ -5,6 +5,7 @@
 
 #define _GNU_SOURCE
 #include "decoder.h"
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,7 @@ struct DecoderCtx {
     /* 硬件设备 */
     AVBufferRef* hw_device_ctx;
     enum AVPixelFormat hw_pix_fmt;
+    bool uses_shared_cuda_device;
     
     /* 格式转换 */
     struct SwsContext* sws_ctx;
@@ -66,6 +68,11 @@ struct DecoderCtx {
     double total_decode_time;
 };
 
+static pthread_mutex_t g_cuda_device_mu = PTHREAD_MUTEX_INITIALIZER;
+static AVBufferRef* g_cuda_device_master = NULL;
+static int g_cuda_device_id = -1;
+static unsigned g_cuda_device_users = 0;
+
 static const char* codec_name_from_id(enum AVCodecID codec_id) {
     switch (codec_id) {
         case AV_CODEC_ID_H264: return "H.264";
@@ -73,6 +80,37 @@ static const char* codec_name_from_id(enum AVCodecID codec_id) {
         case AV_CODEC_ID_AV1:  return "AV1";
         default:               return "unknown";
     }
+}
+
+static enum AVPixelFormat av_format_from_decode(DecodeFormat fmt) {
+    switch (fmt) {
+        case DECODE_FMT_NV12:
+            return AV_PIX_FMT_NV12;
+        case DECODE_FMT_YUV420P:
+            return AV_PIX_FMT_YUV420P;
+        case DECODE_FMT_YUV444P:
+            return AV_PIX_FMT_YUV444P;
+        case DECODE_FMT_BGRA:
+            return AV_PIX_FMT_BGRA;
+        case DECODE_FMT_RGB24:
+            return AV_PIX_FMT_RGB24;
+        default:
+            return AV_PIX_FMT_NONE;
+    }
+}
+
+static enum AVPixelFormat hw_frame_sw_format(const AVFrame* frame) {
+    if (!frame || !frame->hw_frames_ctx) {
+        return AV_PIX_FMT_NONE;
+    }
+
+    const AVHWFramesContext* frames_ctx =
+        (const AVHWFramesContext*)frame->hw_frames_ctx->data;
+    if (!frames_ctx) {
+        return AV_PIX_FMT_NONE;
+    }
+
+    return frames_ctx->sw_format;
 }
 
 /* 检测硬件支持 */
@@ -114,6 +152,86 @@ const char* decoder_backend_name(DecodeBackend backend) {
         case DECODE_BACKEND_CPU:      return "CPU (FFmpeg)";
         default:                      return "Auto";
     }
+}
+
+static int acquire_shared_cuda_device(int device_id, AVBufferRef** out_ctx) {
+    if (!out_ctx) {
+        return AVERROR(EINVAL);
+    }
+
+    *out_ctx = NULL;
+
+    pthread_mutex_lock(&g_cuda_device_mu);
+
+    if (g_cuda_device_master) {
+        if (g_cuda_device_id != device_id) {
+            pthread_mutex_unlock(&g_cuda_device_mu);
+            return AVERROR(EINVAL);
+        }
+
+        *out_ctx = av_buffer_ref(g_cuda_device_master);
+        if (*out_ctx) {
+            g_cuda_device_users++;
+            pthread_mutex_unlock(&g_cuda_device_mu);
+            return 0;
+        }
+
+        pthread_mutex_unlock(&g_cuda_device_mu);
+        return AVERROR(ENOMEM);
+    }
+
+    pthread_mutex_unlock(&g_cuda_device_mu);
+
+    char cuda_dev[16];
+    snprintf(cuda_dev, sizeof(cuda_dev), "%d", device_id);
+
+    AVBufferRef* created = NULL;
+    int ret = av_hwdevice_ctx_create(&created, AV_HWDEVICE_TYPE_CUDA,
+                                     cuda_dev, NULL, 0);
+    if (ret < 0) {
+        return ret;
+    }
+
+    pthread_mutex_lock(&g_cuda_device_mu);
+
+    if (!g_cuda_device_master) {
+        g_cuda_device_master = created;
+        g_cuda_device_id = device_id;
+    } else if (g_cuda_device_id != device_id) {
+        pthread_mutex_unlock(&g_cuda_device_mu);
+        av_buffer_unref(&created);
+        return AVERROR(EINVAL);
+    } else {
+        av_buffer_unref(&created);
+    }
+
+    *out_ctx = av_buffer_ref(g_cuda_device_master);
+    if (*out_ctx) {
+        g_cuda_device_users++;
+        pthread_mutex_unlock(&g_cuda_device_mu);
+        return 0;
+    }
+
+    if (g_cuda_device_users == 0 && g_cuda_device_master) {
+        av_buffer_unref(&g_cuda_device_master);
+        g_cuda_device_master = NULL;
+        g_cuda_device_id = -1;
+    }
+    pthread_mutex_unlock(&g_cuda_device_mu);
+    return AVERROR(ENOMEM);
+}
+
+static void release_shared_cuda_device(void) {
+    pthread_mutex_lock(&g_cuda_device_mu);
+    if (g_cuda_device_users > 0) {
+        g_cuda_device_users--;
+    }
+    if (g_cuda_device_users == 0 && g_cuda_device_master) {
+        av_buffer_unref(&g_cuda_device_master);
+        g_cuda_device_master = NULL;
+        g_cuda_device_id = -1;
+    }
+    pthread_mutex_unlock(&g_cuda_device_mu);
 }
 
 /* 获取硬件像素格式 (参考 embedded ffmpeg_vaapi.c) */
@@ -225,6 +343,19 @@ static DecodeFormat decode_format_from_av(enum AVPixelFormat fmt) {
     }
 }
 
+static DecodeFormat decode_format_from_frame(const AVFrame* frame) {
+    if (!frame) {
+        return DECODE_FMT_NONE;
+    }
+
+    DecodeFormat format = decode_format_from_av((enum AVPixelFormat)frame->format);
+    if (format != DECODE_FMT_NONE) {
+        return format;
+    }
+
+    return decode_format_from_av(hw_frame_sw_format(frame));
+}
+
 /*
  * 计算给定像素格式下各 plane 的有效高度（用于深拷贝）。
  * 注意：frame->linesize 可能包含 padding，但“行数”必须按格式计算。
@@ -249,6 +380,72 @@ static int plane_height_for_pix_fmt(enum AVPixelFormat fmt, int plane, int heigh
             /* 其它格式：保守处理，只拷贝 plane0，避免越界 */
             return (plane == 0) ? height : 0;
     }
+}
+
+static int copy_cpu_frame_data(const DecodedFrame* src, DecodedFrame* dst) {
+    enum AVPixelFormat src_fmt = av_format_from_decode(src->format);
+    if (src_fmt == AV_PIX_FMT_NONE) {
+        return -1;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        if (!src->data[i]) {
+            continue;
+        }
+
+        int lines = plane_height_for_pix_fmt(src_fmt, i, src->height);
+        if (lines <= 0) {
+            continue;
+        }
+
+        dst->linesize[i] = src->linesize[i];
+        dst->data[i] = malloc((size_t)dst->linesize[i] * (size_t)lines);
+        if (!dst->data[i]) {
+            return -1;
+        }
+
+        memcpy(dst->data[i], src->data[i],
+               (size_t)dst->linesize[i] * (size_t)lines);
+    }
+
+    return 0;
+}
+
+static int decoded_frame_set_avframe(DecodedFrame* frame, DecoderCtx* ctx,
+                                     AVFrame* avf, DecodeStorage storage,
+                                     bool take_ownership) {
+    if (!frame || !avf) {
+        return -1;
+    }
+
+    AVFrame* owned = avf;
+    if (!take_ownership) {
+        owned = av_frame_clone(avf);
+        if (!owned) {
+            return -1;
+        }
+    }
+
+    frame->av_frame = owned;
+    frame->_decoder_ctx = ctx;
+    frame->width = owned->width;
+    frame->height = owned->height;
+    frame->pts = owned->pts;
+    frame->key_frame = !!(owned->flags & AV_FRAME_FLAG_KEY);
+    frame->format = decode_format_from_frame(owned);
+    frame->storage = storage;
+
+    if (storage == DECODE_STORAGE_CPU) {
+        for (int i = 0; i < 4; i++) {
+            frame->data[i] = owned->data[i];
+            frame->linesize[i] = owned->linesize[i];
+        }
+    } else {
+        memset(frame->data, 0, sizeof(frame->data));
+        memset(frame->linesize, 0, sizeof(frame->linesize));
+    }
+
+    return 0;
 }
 
 DecoderCtx* decoder_create(const DecoderConfig* config) {
@@ -333,6 +530,9 @@ void decoder_destroy(DecoderCtx* ctx) {
     if (ctx->frame) av_frame_free(&ctx->frame);
     if (ctx->packet) av_packet_free(&ctx->packet);
     if (ctx->hw_device_ctx) av_buffer_unref(&ctx->hw_device_ctx);
+    if (ctx->uses_shared_cuda_device) {
+        release_shared_cuda_device();
+    }
     if (ctx->sws_ctx) sws_freeContext(ctx->sws_ctx);
     
     free(ctx);
@@ -385,13 +585,11 @@ int decoder_init(DecoderCtx* ctx, const uint8_t* extradata, int extradata_size) 
          * 不要手动创建 hw_frames_ctx，否则会干扰 NVDEC 内部帧管理
          */
         ctx->hw_pix_fmt = AV_PIX_FMT_CUDA;
+        ctx->uses_shared_cuda_device = false;
 
-        /* 创建 CUDA 设备上下文 */
-        char cuda_dev[16];
-        snprintf(cuda_dev, sizeof(cuda_dev), "%d", ctx->config.cuda_device_id);
-
-        int ret = av_hwdevice_ctx_create(&ctx->hw_device_ctx, AV_HWDEVICE_TYPE_CUDA,
-                                         cuda_dev, NULL, 0);
+        /* 共享 CUDA 设备上下文，避免 20 路各建一套上下文/事件线程 */
+        int ret = acquire_shared_cuda_device(ctx->config.cuda_device_id,
+                                             &ctx->hw_device_ctx);
         if (ret < 0) {
             char errbuf[128];
             av_strerror(ret, errbuf, sizeof(errbuf));
@@ -399,6 +597,7 @@ int decoder_init(DecoderCtx* ctx, const uint8_t* extradata, int extradata_size) 
             ctx->config.backend = DECODE_BACKEND_CPU;
             ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
         } else {
+            ctx->uses_shared_cuda_device = true;
             /* 只设置 get_format 选择像素格式，不手动创建 hw_frames_ctx */
             ctx->codec_ctx->get_format = get_hw_format;
             ctx->codec_ctx->hw_device_ctx = av_buffer_ref(ctx->hw_device_ctx);
@@ -577,75 +776,52 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                 last_frame = NULL;
             }
             
-            /* 处理硬件帧 - 从 GPU 下载到 CPU */
-            AVFrame* sw_frame = ctx->frame;
-            AVFrame* tmp_frame = NULL;
-            
-            if (ctx->config.backend == DECODE_BACKEND_NVIDIA || 
-                ctx->config.backend == DECODE_BACKEND_INTEL_VA) {
-                if (ctx->frame->format == ctx->hw_pix_fmt) {
-                    tmp_frame = av_frame_alloc();
-                    if (!tmp_frame) {
-                        ctx->stats.frames_dropped++;
-                        continue;
-                    }
-                    
-                    ret = av_hwframe_transfer_data(tmp_frame, ctx->frame, 0);
-                    if (ret < 0) {
-                        av_frame_free(&tmp_frame);
-                        ctx->stats.frames_dropped++;
-                        continue;
-                    }
-                    
-                    av_frame_copy_props(tmp_frame, ctx->frame);
-                    sw_frame = tmp_frame;
-                }
-            }
-            
             /* 分配输出帧 */
             DecodedFrame* frame = calloc(1, sizeof(*frame));
             if (!frame) {
-                if (tmp_frame) av_frame_free(&tmp_frame);
                 continue;
             }
-            
-            frame->width = sw_frame->width;
-            frame->height = sw_frame->height;
-            frame->pts = sw_frame->pts;
-            frame->key_frame = !!(sw_frame->flags & AV_FRAME_FLAG_KEY);
-            frame->_decoder_ctx = ctx;
-            
-            frame->format = decode_format_from_av((enum AVPixelFormat)sw_frame->format);
-            
-            if (tmp_frame) {
-                frame->av_frame = tmp_frame;
-            } else {
-                frame->av_frame = NULL;
-                for (int i = 0; i < 4; i++) {
-                    if (sw_frame->data[i]) {
-                        int lines = plane_height_for_pix_fmt((enum AVPixelFormat)sw_frame->format,
-                                                           i, frame->height);
-                        if (lines <= 0) {
-                            continue;
-                        }
-                        frame->linesize[i] = sw_frame->linesize[i];
-                        frame->data[i] = malloc(frame->linesize[i] * lines);
-                        if (frame->data[i]) {
-                            memcpy(frame->data[i], sw_frame->data[i],
-                                   (size_t)frame->linesize[i] * (size_t)lines);
-                        }
+
+            AVFrame* out_avf = ctx->frame;
+            DecodeStorage storage = DECODE_STORAGE_CPU;
+            bool take_ownership = false;
+
+            if ((ctx->config.backend == DECODE_BACKEND_NVIDIA ||
+                 ctx->config.backend == DECODE_BACKEND_INTEL_VA) &&
+                ctx->frame->format == ctx->hw_pix_fmt) {
+                if (ctx->config.defer_hw_download) {
+                    storage = DECODE_STORAGE_HW;
+                } else {
+                    AVFrame* tmp_frame = av_frame_alloc();
+                    if (!tmp_frame) {
+                        free(frame);
+                        ctx->stats.frames_dropped++;
+                        continue;
                     }
+
+                    ret = av_hwframe_transfer_data(tmp_frame, ctx->frame, 0);
+                    if (ret < 0) {
+                        av_frame_free(&tmp_frame);
+                        free(frame);
+                        ctx->stats.frames_dropped++;
+                        continue;
+                    }
+
+                    av_frame_copy_props(tmp_frame, ctx->frame);
+                    out_avf = tmp_frame;
+                    take_ownership = true;
                 }
             }
-            
-            if (frame->av_frame) {
-                AVFrame* avf = (AVFrame*)frame->av_frame;
-                for (int i = 0; i < 4; i++) {
-                    frame->data[i] = avf->data[i];
-                    frame->linesize[i] = avf->linesize[i];
+
+            if (decoded_frame_set_avframe(frame, ctx, out_avf, storage, take_ownership) != 0) {
+                if (take_ownership) {
+                    av_frame_free(&out_avf);
                 }
+                free(frame);
+                ctx->stats.frames_dropped++;
+                continue;
             }
-            
+
             last_frame = frame;
         }
     } /* end parser loop */
@@ -693,6 +869,91 @@ void decoder_free_frame(DecodedFrame* frame) {
     free(frame);
 }
 
+DecodedFrame* decoder_ref_frame(const DecodedFrame* src) {
+    if (!src) {
+        return NULL;
+    }
+
+    DecodedFrame* dst = calloc(1, sizeof(*dst));
+    if (!dst) {
+        return NULL;
+    }
+
+    dst->width = src->width;
+    dst->height = src->height;
+    dst->pts = src->pts;
+    dst->key_frame = src->key_frame;
+    dst->format = src->format;
+    dst->storage = src->storage;
+    dst->_decoder_ctx = src->_decoder_ctx;
+
+    if (src->av_frame) {
+        if (decoded_frame_set_avframe(dst, (DecoderCtx*)src->_decoder_ctx,
+                                      (AVFrame*)src->av_frame, src->storage, false) != 0) {
+            free(dst);
+            return NULL;
+        }
+        return dst;
+    }
+
+    if (copy_cpu_frame_data(src, dst) != 0) {
+        decoder_free_frame(dst);
+        return NULL;
+    }
+
+    return dst;
+}
+
+int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame) {
+    if (!src || !out_frame) {
+        return -1;
+    }
+
+    *out_frame = NULL;
+
+    if (src->storage == DECODE_STORAGE_CPU) {
+        DecodedFrame* clone = decoder_ref_frame(src);
+        if (!clone) {
+            return -1;
+        }
+        *out_frame = clone;
+        return 0;
+    }
+
+    if (!src->av_frame) {
+        return -1;
+    }
+
+    AVFrame* hw_frame = (AVFrame*)src->av_frame;
+    AVFrame* sw_frame = av_frame_alloc();
+    if (!sw_frame) {
+        return -1;
+    }
+
+    int ret = av_hwframe_transfer_data(sw_frame, hw_frame, 0);
+    if (ret < 0) {
+        av_frame_free(&sw_frame);
+        return -1;
+    }
+    av_frame_copy_props(sw_frame, hw_frame);
+
+    DecodedFrame* dst = calloc(1, sizeof(*dst));
+    if (!dst) {
+        av_frame_free(&sw_frame);
+        return -1;
+    }
+
+    if (decoded_frame_set_avframe(dst, (DecoderCtx*)src->_decoder_ctx,
+                                  sw_frame, DECODE_STORAGE_CPU, true) != 0) {
+        av_frame_free(&sw_frame);
+        free(dst);
+        return -1;
+    }
+
+    *out_frame = dst;
+    return 0;
+}
+
 int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
     if (!ctx || !ctx->initialized) return -1;
     
@@ -717,56 +978,38 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
     DecodedFrame* frame = calloc(1, sizeof(*frame));
     if (!frame) return -1;
 
-    frame->width = ctx->frame->width;
-    frame->height = ctx->frame->height;
-    frame->pts = ctx->frame->pts;
-    frame->key_frame = !!(ctx->frame->flags & AV_FRAME_FLAG_KEY);
-    frame->_decoder_ctx = ctx;
+    AVFrame* out_avf = ctx->frame;
+    DecodeStorage storage = DECODE_STORAGE_CPU;
+    bool take_ownership = false;
 
-    /* 硬件帧需要先下载到 CPU */
-    AVFrame* sw_frame = ctx->frame;
-    AVFrame* tmp_frame = NULL;
-    if (ctx->config.backend == DECODE_BACKEND_NVIDIA ||
-        ctx->config.backend == DECODE_BACKEND_INTEL_VA) {
-        if (ctx->frame->format == ctx->hw_pix_fmt) {
-            tmp_frame = av_frame_alloc();
-            if (!tmp_frame) { free(frame); return -1; }
+    if ((ctx->config.backend == DECODE_BACKEND_NVIDIA ||
+         ctx->config.backend == DECODE_BACKEND_INTEL_VA) &&
+        ctx->frame->format == ctx->hw_pix_fmt) {
+        if (ctx->config.defer_hw_download) {
+            storage = DECODE_STORAGE_HW;
+        } else {
+            AVFrame* tmp_frame = av_frame_alloc();
+            if (!tmp_frame) {
+                free(frame);
+                return -1;
+            }
             if (av_hwframe_transfer_data(tmp_frame, ctx->frame, 0) < 0) {
                 av_frame_free(&tmp_frame);
                 free(frame);
                 return -1;
             }
             av_frame_copy_props(tmp_frame, ctx->frame);
-            sw_frame = tmp_frame;
+            out_avf = tmp_frame;
+            take_ownership = true;
         }
     }
 
-    frame->format = decode_format_from_av((enum AVPixelFormat)sw_frame->format);
-
-    if (tmp_frame) {
-        /* 零拷贝：frame 持有 AVFrame 所有权 */
-        frame->av_frame = tmp_frame;
-        for (int i = 0; i < 4; i++) {
-            frame->data[i] = tmp_frame->data[i];
-            frame->linesize[i] = tmp_frame->linesize[i];
+    if (decoded_frame_set_avframe(frame, ctx, out_avf, storage, take_ownership) != 0) {
+        if (take_ownership) {
+            av_frame_free(&out_avf);
         }
-    } else {
-        /* CPU 帧：深拷贝数据 */
-        for (int i = 0; i < 4; i++) {
-            if (sw_frame->data[i]) {
-                int lines = plane_height_for_pix_fmt((enum AVPixelFormat)sw_frame->format,
-                                                   i, frame->height);
-                if (lines <= 0) {
-                    continue;
-                }
-                frame->linesize[i] = sw_frame->linesize[i];
-                frame->data[i] = malloc(frame->linesize[i] * lines);
-                if (frame->data[i]) {
-                    memcpy(frame->data[i], sw_frame->data[i],
-                           (size_t)frame->linesize[i] * lines);
-                }
-            }
-        }
+        free(frame);
+        return -1;
     }
 
     *out_frame = frame;
@@ -776,14 +1019,24 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
 int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
                            DecodedFrame* dst, DecodeFormat target_format) {
     if (!ctx || !src || !dst) return -1;
-    
+
+    const DecodedFrame* conv_src = src;
+    DecodedFrame* materialized = NULL;
+    if (src->storage == DECODE_STORAGE_HW) {
+        if (decoder_materialize_frame(src, &materialized) != 0) {
+            return -1;
+        }
+        conv_src = materialized;
+    }
+
     /* 允许 NV12 / YUV420P / YUV444P -> BGRA */
     if (target_format != DECODE_FMT_BGRA) {
+        decoder_free_frame(materialized);
         return -1;
     }
 
     enum AVPixelFormat src_pix_fmt;
-    switch (src->format) {
+    switch (conv_src->format) {
         case DECODE_FMT_NV12:
             src_pix_fmt = AV_PIX_FMT_NV12;
             break;
@@ -794,48 +1047,53 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
             src_pix_fmt = AV_PIX_FMT_YUV444P;
             break;
         default:
+            decoder_free_frame(materialized);
             return -1;
     }
     
     /* 初始化 SwsContext（如果未初始化） */
     if (!ctx->sws_ctx) {
         ctx->sws_ctx = sws_getContext(
-            src->width, src->height, src_pix_fmt,
-            src->width, src->height, AV_PIX_FMT_BGRA,
+            conv_src->width, conv_src->height, src_pix_fmt,
+            conv_src->width, conv_src->height, AV_PIX_FMT_BGRA,
             SWS_BILINEAR, NULL, NULL, NULL
         );
         if (!ctx->sws_ctx) {
+            decoder_free_frame(materialized);
             return -1;
         }
     }
     
     /* 分配目标帧内存 */
-    dst->width = src->width;
-    dst->height = src->height;
+    dst->width = conv_src->width;
+    dst->height = conv_src->height;
     dst->format = target_format;
-    dst->pts = src->pts;
-    dst->key_frame = src->key_frame;
+    dst->storage = DECODE_STORAGE_CPU;
+    dst->pts = conv_src->pts;
+    dst->key_frame = conv_src->key_frame;
     
     /* BGRA 每像素 4 字节 */
-    dst->linesize[0] = src->width * 4;
-    dst->data[0] = malloc(dst->linesize[0] * src->height);
+    dst->linesize[0] = conv_src->width * 4;
+    dst->data[0] = malloc((size_t)dst->linesize[0] * (size_t)conv_src->height);
     if (!dst->data[0]) {
+        decoder_free_frame(materialized);
         return -1;
     }
     
     /* 执行转换 */
-    const uint8_t* src_data[4] = { src->data[0], src->data[1], src->data[2], NULL };
+    const uint8_t* src_data[4] = { conv_src->data[0], conv_src->data[1], conv_src->data[2], NULL };
     uint8_t* dst_data[4] = { dst->data[0], NULL, NULL, NULL };
-    int src_linesize[4] = { src->linesize[0], src->linesize[1], 0, 0 };
+    int src_linesize[4] = { conv_src->linesize[0], conv_src->linesize[1], 0, 0 };
     int dst_linesize[4] = { dst->linesize[0], 0, 0, 0 };
 
-    if (src->format == DECODE_FMT_YUV420P || src->format == DECODE_FMT_YUV444P) {
-        src_linesize[2] = src->linesize[2];
+    if (conv_src->format == DECODE_FMT_YUV420P || conv_src->format == DECODE_FMT_YUV444P) {
+        src_linesize[2] = conv_src->linesize[2];
     }
     
-    sws_scale(ctx->sws_ctx, src_data, src_linesize, 0, src->height,
+    sws_scale(ctx->sws_ctx, src_data, src_linesize, 0, conv_src->height,
               dst_data, dst_linesize);
-    
+
+    decoder_free_frame(materialized);
     return 0;
 }
 

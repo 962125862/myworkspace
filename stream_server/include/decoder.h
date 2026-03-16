@@ -51,6 +51,12 @@ typedef enum {
     DECODE_FMT_RGB24               /* RGB 24bit */
 } DecodeFormat;
 
+/** 解码帧当前存放位置 */
+typedef enum {
+    DECODE_STORAGE_CPU = 0,        /* data[] 指向可直接访问的 CPU 内存 */
+    DECODE_STORAGE_HW              /* av_frame 为硬件帧句柄，需按需下载 */
+} DecodeStorage;
+
 /* ==================== 解码帧 ==================== */
 
 /**
@@ -69,6 +75,7 @@ typedef struct {
     int width;                   /* 帧宽度 (像素) */
     int height;                  /* 帧高度 (像素) */
     DecodeFormat format;         /* 像素格式 */
+    DecodeStorage storage;       /* CPU 可访问帧 / 硬件帧 */
     int64_t pts;                 /* 展示时间戳 */
     bool key_frame;              /* 是否关键帧 (IDR) */
     void* _decoder_ctx;          /* 内部使用: 关联的解码器上下文 */
@@ -86,6 +93,7 @@ typedef struct {
     int thread_count;            /* CPU 软解线程数 (硬解忽略) */
     char va_device[64];          /* VA-API 设备路径 (如 /dev/dri/renderD128) */
     int cuda_device_id;          /* NVIDIA GPU 设备 ID (通常为 0) */
+    bool defer_hw_download;      /* true: last_frame 保留硬件帧，按需下载 */
 } DecoderConfig;
 
 /* ==================== 解码器上下文 ==================== */
@@ -146,7 +154,9 @@ int decoder_init(DecoderCtx* ctx, const uint8_t* extradata, int extradata_size);
  *   1. av_parser_parse2() 循环消费全部输入（关键! 否则帧率减半）
  *   2. avcodec_send_packet() 送入解码器，EAGAIN 时先 drain 再重试
  *   3. avcodec_receive_frame() 循环取出所有解码帧，只保留最后一帧
- *   4. 硬件帧通过 av_hwframe_transfer_data() 下载到系统内存
+ *   4. 根据配置选择：
+ *      - 立即 av_hwframe_transfer_data() 下载到系统内存
+ *      - 或保留硬件帧引用，后续按需 materialize
  */
 int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                    DecodedFrame** out_frame);
@@ -156,6 +166,12 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame);
 
 /** 释放解码帧（自动区分零拷贝/传统模式） */
 void decoder_free_frame(DecodedFrame* frame);
+
+/** 引用/复制一帧，调用方需用 decoder_free_frame() 释放 */
+DecodedFrame* decoder_ref_frame(const DecodedFrame* frame);
+
+/** 硬件帧按需下载到 CPU；CPU 帧则返回一份引用/副本 */
+int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame);
 
 /**
  * @brief 像素格式转换 (当前支持 NV12/YUV420P/YUV444P -> BGRA)

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include <unistd.h>
@@ -117,6 +118,40 @@ static DecodeBackend adjust_backend_for_stream(const StreamInfo* info, DecodeBac
     }
 
     return backend;
+}
+
+static bool parse_bool_env_enabled(const char* name, bool default_value) {
+    const char* value = getenv(name);
+    if (!value || !*value) {
+        return default_value;
+    }
+
+    if (strcmp(value, "1") == 0 ||
+        strcasecmp(value, "true") == 0 ||
+        strcasecmp(value, "yes") == 0 ||
+        strcasecmp(value, "on") == 0) {
+        return true;
+    }
+
+    if (strcmp(value, "0") == 0 ||
+        strcasecmp(value, "false") == 0 ||
+        strcasecmp(value, "no") == 0 ||
+        strcasecmp(value, "off") == 0) {
+        return false;
+    }
+
+    return default_value;
+}
+
+static bool stream_defer_hw_download_enabled(void) {
+    static int cached = -1;
+
+    if (cached < 0) {
+        cached = parse_bool_env_enabled("STREAM_DEFER_HW_DOWNLOAD", false) ? 1 : 0;
+        printf("[Stream] STREAM_DEFER_HW_DOWNLOAD=%s\n", cached ? "on" : "off");
+    }
+
+    return cached == 1;
 }
 
 int stream_manager_init(StreamManager* mgr) {
@@ -285,7 +320,8 @@ int stream_init_decoder(StreamContext* stream, int backend) {
         .output_format = DECODE_FMT_NV12,
         .thread_count = 2,
         .va_device = "/dev/dri/renderD128",
-        .cuda_device_id = 0
+        .cuda_device_id = 0,
+        .defer_hw_download = stream_defer_hw_download_enabled()
     };
     
     DecoderCtx* ctx = NULL;
