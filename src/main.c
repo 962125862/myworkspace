@@ -400,21 +400,21 @@ static void stream_options_defaults(StreamOptions* o) {
     o->tcp_port = 9000;
     o->stream_id = 1;
 
-    o->width = 1280;
-    o->height = 720;
-    o->fps = 60;
+    o->width = 1024;
+    o->height = 768;
+    o->fps = 30;
     o->bitrate = 10000;
     o->packet_size = 1392;  /* Moonlight 标准包大小，减少网络开销 */
 
     o->ll_color_space = default_limelight_color_space();
-    o->ll_color_range = default_limelight_color_range();
+    o->ll_color_range = COLOR_RANGE_FULL;
 
     o->control_bind = "127.0.0.1";
     o->control_port = 0;
     /* Default ON: Sunshine may not report modes on some setups (e.g. VM). */
     o->skip_mode_check = true;
-    o->codec = STREAM_CODEC_H264;
-    o->chroma = STREAM_CHROMA_420;
+    o->codec = STREAM_CODEC_HEVC;
+    o->chroma = STREAM_CHROMA_444;
     o->bitdepth = 8;
     o->codec_explicit = false;
 }
@@ -442,15 +442,15 @@ static void print_usage(const char* argv0) {
             "  --tcp-host <ip>           default: 127.0.0.1\n"
             "  --tcp-port <port>         default: 9000\n"
             "  --stream-id <id>          default: 1 (1-65535)\n"
-            "  --width <n>               default: 1280\n"
-            "  --height <n>              default: 720\n"
-            "  --fps <n>                 default: 60\n"
+            "  --width <n>               default: 1024\n"
+            "  --height <n>              default: 768\n"
+            "  --fps <n>                 default: 30\n"
             "  --bitrate <n>             default: 10000 (kbps)\n"
             "  --packet-size <n>         default: 1024\n"
             "  --colorspace <601|709>    default: 709\n"
-            "  --range <limited|full>    default: limited\n"
-            "  --codec <h264|hevc|av1>   default: h264 (auto-switch to hevc when chroma=444 unless explicitly set)\n"
-            "  --chroma <420|444>        default: 420\n"
+            "  --range <limited|full>    default: full\n"
+            "  --codec <h264|hevc|av1>   default: hevc\n"
+            "  --chroma <420|444>        default: 444\n"
             "  --bitdepth <8|10>         default: 8\n"
             "  --skip-mode-check         default: on (allow starting even if server doesn't report modes)\n"
             "  --enforce-mode-check      force server mode validation (may fail if server doesn't report modes)\n"

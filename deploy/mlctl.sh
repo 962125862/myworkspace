@@ -100,17 +100,17 @@ write_worker_config() {
     local tcp_host="${6:-127.0.0.1}"
     local tcp_port="${7:-}"
     local stream_id="${8:-}"
-    local control_bind="${9:-127.0.0.1}"
+    local control_bind="${9:-0.0.0.0}"
     local control_port="${10:-}"
-    local width="${11:-1280}"
-    local height="${12:-720}"
-    local fps="${13:-60}"
+    local width="${11:-1024}"
+    local height="${12:-768}"
+    local fps="${13:-30}"
     local bitrate="${14:-10000}"
     local packet_size="${15:-1024}"
     local colorspace="${16:-709}"
-    local range="${17:-limited}"
-    local codec="${18:-h264}"
-    local chroma="${19:-420}"
+    local range="${17:-full}"
+    local codec="${18:-hevc}"
+    local chroma="${19:-444}"
     local bitdepth="${20:-8}"
     local skip_mode_check="${21:-1}"
 
@@ -118,14 +118,19 @@ write_worker_config() {
 
     # If not specified, auto-assign TCP port / stream_id / control_port.
     # Convention:
-    # - worker_sN -> STREAM_ID=N, CONTROL_PORT=50000+N (so stream 1 -> 50001)
+    # - worker_sN -> TCP_PORT=9000, STREAM_ID=N, CONTROL_PORT=50000+N
+    # - worker_<last_ip_octet> keeps idx-based fallback behavior unless stream_id/control_port are passed in explicitly
     # - other names that end with digits keep the old behavior (idx-based)
     if [[ -z "$tcp_port" ]]; then
-        local idx_str=""
-        if [[ "$name" =~ ([0-9]+)$ ]]; then
-            idx_str="${BASH_REMATCH[1]}"
+        if [[ "$name" =~ ^worker_s([0-9]+)$ ]]; then
+            tcp_port=9000
+        else
+            local idx_str=""
+            if [[ "$name" =~ ([0-9]+)$ ]]; then
+                idx_str="${BASH_REMATCH[1]}"
+            fi
+            tcp_port=$((9000 + 10#${idx_str:-0}))
         fi
-        tcp_port=$((9000 + 10#${idx_str:-0}))
     fi
 
     if [[ -z "$stream_id" ]]; then
@@ -252,7 +257,7 @@ create_worker_interactive() {
     echo
     log "控制端口配置（用于 REQ_IDR/鼠标键盘注入，ml_worker UDP socket）"
     local control_bind
-    prompt_with_default control_bind "CONTROL_BIND" "127.0.0.1"
+    prompt_with_default control_bind "CONTROL_BIND" "0.0.0.0"
     local control_port
     prompt_with_default control_port "CONTROL_PORT" "50001"
 
@@ -260,9 +265,9 @@ create_worker_interactive() {
     log "视频参数配置"
     echo "  宽高/fps/码率会直接影响 Sunshine 编码负载、带宽和后续解码开销。"
     local width height fps bitrate packet_size
-    prompt_with_default width "WIDTH 编码宽度" "1280"
-    prompt_with_default height "HEIGHT 编码高度" "720"
-    prompt_with_default fps "FPS 帧率" "60"
+    prompt_with_default width "WIDTH 编码宽度" "1024"
+    prompt_with_default height "HEIGHT 编码高度" "768"
+    prompt_with_default fps "FPS 帧率" "30"
     prompt_with_default bitrate "BITRATE 码率(kbps)" "10000"
     prompt_with_default packet_size "PACKET_SIZE 单包大小(bytes)" "1024"
 
@@ -271,14 +276,14 @@ create_worker_interactive() {
     echo "  COLORSPACE 推荐 709；RANGE 选 full 可保留完整范围，limited 更传统。"
     local colorspace range
     prompt_with_default colorspace "COLORSPACE (709/601)" "709"
-    prompt_with_default range "RANGE (full/limited)" "limited"
+    prompt_with_default range "RANGE (full/limited)" "full"
 
     echo
     log "编码参数配置"
-    echo "  444 场景推荐 hevc + 444 + 8bit；通用兼容场景推荐 h264 + 420 + 8bit。"
+    echo "  当前默认推荐 hevc + 444 + 8bit；如需兼容老链路再切 h264 + 420 + 8bit。"
     local codec chroma bitdepth skip_mode_check
-    prompt_with_default codec "CODEC (h264/hevc)" "h264"
-    prompt_with_default chroma "CHROMA (420/444)" "420"
+    prompt_with_default codec "CODEC (h264/hevc)" "hevc"
+    prompt_with_default chroma "CHROMA (420/444)" "444"
     prompt_with_default bitdepth "BITDEPTH (8/10)" "8"
 
     echo
@@ -311,17 +316,17 @@ create_worker_noninteractive() {
     local tcp_host="${6:-127.0.0.1}"
     local tcp_port="${7:-}"
     local stream_id="${8:-}"
-    local control_bind="${9:-127.0.0.1}"
+    local control_bind="${9:-0.0.0.0}"
     local control_port="${10:-}"
-    local width="${11:-1280}"
-    local height="${12:-720}"
-    local fps="${13:-60}"
+    local width="${11:-1024}"
+    local height="${12:-768}"
+    local fps="${13:-30}"
     local bitrate="${14:-10000}"
     local packet_size="${15:-1024}"
     local colorspace="${16:-709}"
-    local range="${17:-limited}"
-    local codec="${18:-h264}"
-    local chroma="${19:-420}"
+    local range="${17:-full}"
+    local codec="${18:-hevc}"
+    local chroma="${19:-444}"
     local bitdepth="${20:-8}"
     local skip_mode_check="${21:-1}"
 
@@ -340,6 +345,156 @@ create_worker_noninteractive() {
         "$tcp_host" "$tcp_port" "$stream_id" "$control_bind" "$control_port" \
         "$width" "$height" "$fps" "$bitrate" "$packet_size" \
         "$colorspace" "$range" "$codec" "$chroma" "$bitdepth" "$skip_mode_check"
+}
+
+create_workers_batch() {
+    local host="$1"
+    local start_idx="${2:-1}"
+    local end_idx="${3:-10}"
+    local app="${4:-Desktop}"
+    local image="${5:-$DEFAULT_IMAGE}"
+    local worker_bin="${6:-$DEFAULT_WORKER_BIN}"
+    local tcp_host="${7:-127.0.0.1}"
+    local tcp_port="${8:-9000}"
+    local control_bind="${9:-0.0.0.0}"
+    local width="${10:-1024}"
+    local height="${11:-768}"
+    local fps="${12:-30}"
+    local bitrate="${13:-10000}"
+    local packet_size="${14:-1024}"
+    local colorspace="${15:-709}"
+    local range="${16:-full}"
+    local codec="${17:-hevc}"
+    local chroma="${18:-444}"
+    local bitdepth="${19:-8}"
+    local skip_mode_check="${20:-1}"
+
+    if [[ -z "$host" ]]; then
+        err "create_workers_batch: host 不能为空"
+        return 1
+    fi
+    [[ "$start_idx" =~ ^[0-9]+$ && "$end_idx" =~ ^[0-9]+$ ]] || {
+        err "create_workers_batch: start/end 必须是正整数"
+        return 1
+    }
+    (( start_idx >= 1 && end_idx >= start_idx )) || {
+        err "create_workers_batch: 需要满足 1 <= start <= end"
+        return 1
+    }
+    (( end_idx <= 999 )) || {
+        err "create_workers_batch: end 过大，当前限制到 999"
+        return 1
+    }
+
+    local i name created=0 skipped=0
+    for ((i = start_idx; i <= end_idx; i++)); do
+        name="worker_s${i}"
+        if worker_exists "$name"; then
+            log "跳过已存在配置: $name"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        create_worker_noninteractive \
+            "$name" "$host" "$app" "$image" "$worker_bin" \
+            "$tcp_host" "$tcp_port" "$i" "$control_bind" "$((50000 + i))" \
+            "$width" "$height" "$fps" "$bitrate" "$packet_size" \
+            "$colorspace" "$range" "$codec" "$chroma" "$bitdepth" "$skip_mode_check" || return 1
+        created=$((created + 1))
+    done
+
+    log "批量创建完成: created=$created skipped=$skipped range=worker_s${start_idx}..worker_s${end_idx}"
+}
+
+generate_ctrl_map_file() {
+    local output_path="${1:-$BASE_DIR/stream_server_ctrl_map.txt}"
+    mkdir -p "$(dirname "$output_path")"
+    : > "$output_path"
+
+    local name file stream_id control_port
+    while IFS= read -r name; do
+        file="$(worker_config_path "$name")"
+        [[ -f "$file" ]] || continue
+        # shellcheck disable=SC1090
+        source "$file"
+        stream_id="${STREAM_ID:-}"
+        control_port="${CONTROL_PORT:-}"
+        if [[ -n "$stream_id" && -n "$control_port" ]]; then
+            printf '%s 127.0.0.1 %s\n' "$stream_id" "$control_port" >> "$output_path"
+        fi
+    done < <(list_worker_names)
+
+    log "已生成 ctrl map 文件: $output_path"
+}
+
+create_workers_from_ip_list() {
+    local output_map="$BASE_DIR/stream_server_ctrl_map.txt"
+    local app="Desktop"
+    local image="$DEFAULT_IMAGE"
+    local worker_bin="$DEFAULT_WORKER_BIN"
+    local tcp_host="127.0.0.1"
+    local tcp_port="9000"
+    local control_bind="0.0.0.0"
+    local width="1024"
+    local height="768"
+    local fps="30"
+    local bitrate="10000"
+    local packet_size="1024"
+    local colorspace="709"
+    local range="full"
+    local codec="hevc"
+    local chroma="444"
+    local bitdepth="8"
+    local skip_mode_check="1"
+    local start_idx=1
+
+    if [[ "${1:-}" == "--start" ]]; then
+        start_idx="${2:-}"
+        shift 2
+    fi
+
+    (( $# >= 1 )) || {
+        err "batch-add-ips: 至少需要一个 ip"
+        return 1
+    }
+    [[ "$start_idx" =~ ^[0-9]+$ ]] || {
+        err "batch-add-ips: --start 必须是正整数"
+        return 1
+    }
+
+    local idx="$start_idx"
+    local raw host suffix name control_port
+    local -a items
+    for raw in "$@"; do
+        IFS=',' read -r -a items <<< "$raw"
+        local item
+        for item in "${items[@]}"; do
+            host="${item// /}"
+            [[ -n "$host" ]] || continue
+            suffix="${host##*.}"
+            [[ "$suffix" =~ ^[0-9]+$ ]] || {
+                err "batch-add-ips: 无法从 host 提取最后一段: $host"
+                return 1
+            }
+            name="worker_${suffix}"
+            control_port=$((50000 + idx))
+
+            if worker_exists "$name"; then
+                err "worker 已存在，停止批量创建: $name"
+                return 1
+            fi
+
+            create_worker_noninteractive \
+                "$name" "$host" "$app" "$image" "$worker_bin" \
+                "$tcp_host" "$tcp_port" "$idx" "$control_bind" "$control_port" \
+                "$width" "$height" "$fps" "$bitrate" "$packet_size" \
+                "$colorspace" "$range" "$codec" "$chroma" "$bitdepth" "$skip_mode_check" || return 1
+            idx=$((idx + 1))
+        done
+    done
+
+    generate_ctrl_map_file "$output_map"
+    log "按 IP 列表批量创建完成: created=$((idx - start_idx)) stream_id=${start_idx}..$((idx - 1))"
 }
 
 ensure_worker_or_create() {
@@ -395,7 +550,7 @@ load_worker() {
     fi
 
     KEY_DIR="${KEY_DIR:-$DATA_DIR/$NAME/keys}"
-    CONTROL_BIND="${CONTROL_BIND:-127.0.0.1}"
+    CONTROL_BIND="${CONTROL_BIND:-0.0.0.0}"
     if [[ -z "${CONTROL_PORT:-}" ]]; then
         if [[ -n "$idx_str" ]]; then
             CONTROL_PORT=$((50001 + 10#$idx_str))
@@ -418,15 +573,15 @@ load_worker() {
     # Video params can be configured per-worker in the worker config file.
     # For one-click/stack usage, allow container env to provide global defaults
     # (applies only when the worker config doesn't specify a value).
-    WIDTH="${WIDTH:-${ML_WORKER_DEFAULT_WIDTH:-1280}}"
-    HEIGHT="${HEIGHT:-${ML_WORKER_DEFAULT_HEIGHT:-720}}"
-    FPS="${FPS:-${ML_WORKER_DEFAULT_FPS:-60}}"
+    WIDTH="${WIDTH:-${ML_WORKER_DEFAULT_WIDTH:-1024}}"
+    HEIGHT="${HEIGHT:-${ML_WORKER_DEFAULT_HEIGHT:-768}}"
+    FPS="${FPS:-${ML_WORKER_DEFAULT_FPS:-30}}"
     BITRATE="${BITRATE:-${ML_WORKER_DEFAULT_BITRATE:-10000}}"
     PACKET_SIZE="${PACKET_SIZE:-${ML_WORKER_DEFAULT_PACKET_SIZE:-1024}}"
     COLORSPACE="${COLORSPACE:-${ML_WORKER_DEFAULT_COLORSPACE:-709}}"
-    RANGE="${RANGE:-${ML_WORKER_DEFAULT_RANGE:-limited}}"
-    CODEC="${CODEC:-${ML_WORKER_DEFAULT_CODEC:-h264}}"
-    CHROMA="${CHROMA:-${ML_WORKER_DEFAULT_CHROMA:-420}}"
+    RANGE="${RANGE:-${ML_WORKER_DEFAULT_RANGE:-full}}"
+    CODEC="${CODEC:-${ML_WORKER_DEFAULT_CODEC:-hevc}}"
+    CHROMA="${CHROMA:-${ML_WORKER_DEFAULT_CHROMA:-444}}"
     BITDEPTH="${BITDEPTH:-${ML_WORKER_DEFAULT_BITDEPTH:-8}}"
     # Skip Sunshine "supported modes" validation by default. Some Sunshine setups
     # (e.g. certain VMs) don't report modes, but streaming still works.
@@ -710,6 +865,80 @@ pair_up_worker() {
     fi
 }
 
+batch_pair_workers() {
+    local start_idx="${1:-}"
+    local end_idx="${2:-}"
+    local pin_spec="${3:-}"
+
+    [[ -n "$start_idx" && -n "$end_idx" ]] || {
+        err "batch-pair: 需要 start 和 end，例如: $0 batch-pair 1 20 1234"
+        return 1
+    }
+    [[ "$start_idx" =~ ^[0-9]+$ && "$end_idx" =~ ^[0-9]+$ ]] || {
+        err "batch-pair: start/end 必须是正整数"
+        return 1
+    }
+    (( start_idx >= 1 && end_idx >= start_idx )) || {
+        err "batch-pair: 需要满足 1 <= start <= end"
+        return 1
+    }
+
+    local total=$((end_idx - start_idx + 1))
+    local use_pin_list=0
+    local -a pin_list=()
+    if [[ -n "$pin_spec" ]]; then
+        if [[ "$pin_spec" =~ ^[0-9]{4}$ ]]; then
+            :
+        else
+            IFS=',' read -r -a pin_list <<< "$pin_spec"
+            if [[ "${#pin_list[@]}" -ne "$total" ]]; then
+                err "batch-pair: PIN 列表数量必须和 worker 数量一致，当前需要 $total 个"
+                return 1
+            fi
+
+            local item
+            for item in "${pin_list[@]}"; do
+                if [[ ! "$item" =~ ^[0-9]{4}$ ]]; then
+                    err "batch-pair: 每个 PIN 都必须是 4 位数字，非法值: $item"
+                    return 1
+                fi
+            done
+            use_pin_list=1
+        fi
+    fi
+
+    local i name pin index paired=0 failed=0 missing=0
+    for ((i = start_idx; i <= end_idx; i++)); do
+        name="worker_s${i}"
+        if ! worker_exists "$name"; then
+            err "batch-pair: worker 不存在，跳过: $name"
+            missing=$((missing + 1))
+            continue
+        fi
+
+        pin=""
+        if [[ -n "$pin_spec" ]]; then
+            if [[ "$use_pin_list" -eq 1 ]]; then
+                index=$((i - start_idx))
+                pin="${pin_list[$index]}"
+            else
+                pin="$pin_spec"
+            fi
+        fi
+
+        log "批量配对: $name pin=${pin:-'(auto)'}"
+        if pair_worker "$name" "$pin"; then
+            paired=$((paired + 1))
+        else
+            failed=$((failed + 1))
+            err "batch-pair: 配对失败: $name"
+        fi
+    done
+
+    log "批量配对完成: paired=$paired failed=$failed missing=$missing range=worker_s${start_idx}..worker_s${end_idx}"
+    [[ "$failed" -eq 0 && "$missing" -eq 0 ]]
+}
+
 delete_worker() {
     local name="$1"
 
@@ -918,11 +1147,18 @@ usage() {
   $0 add worker00 192.168.11.50 [Desktop]
   $0 add worker00 192.168.11.50 Desktop [image] [worker_bin] [tcp_host] [tcp_port] [stream_id] [control_bind] [control_port]
   $0 add worker00 192.168.11.50 Desktop [image] [worker_bin] [tcp_host] [tcp_port] [stream_id] [control_bind] [control_port] [width] [height] [fps] [bitrate] [packet_size] [colorspace] [range] [codec] [chroma] [bitdepth] [skip_mode_check]
+  $0 batch-add <host> [start] [end]
+  $0 batch-add 192.168.11.170 1 20
+  $0 batch-add-ips <ip1> [ip2] [ip3] ...
+  $0 batch-add-ips 192.168.11.150 192.168.11.151 192.168.11.152
+  $0 batch-add-ips --start 5 192.168.11.150,192.168.11.151
 
   $0 status
   $0 status worker00
 
   $0 pair worker00 [pin]
+  $0 batch-pair <start> <end> [pin|pin1,pin2,...]
+  $0 batch-pair 1 20 1234
   $0 pair-up worker00 [pin]
   $0 list worker00
 
@@ -938,8 +1174,14 @@ usage() {
 - 现在不需要你手动创建 worker00.conf
 - 如果 pair/up 时 worker 不存在，会提示你现场创建
 - add 可显式新建 worker
+- batch-add : 批量创建 `worker_sN`，默认共用 `TCP_PORT=9000`，`STREAM_ID=N`，`CONTROL_PORT=50000+N`
+- batch-add-ips : 按输入 IP 顺序批量创建，命名规则 `worker_<ip最后一段>`，并自动生成 `deploy/stream_server_ctrl_map.txt`
+  - 生成的 ctrl map 可直接给 `stream_server --ml-worker-ctrl-map-file deploy/stream_server_ctrl_map.txt` 使用
 - pair      : 启动一次性 pair 容器，看到 PIN 后去 Sunshine 主机输入
 -            可选指定 PIN: $0 pair worker00 1234
+- batch-pair: 依次对 `worker_sN` 做串行配对，可传固定 PIN，也可传逗号分隔 PIN 列表
+-            例如: $0 batch-pair 1 3 1234
+-            例如: $0 batch-pair 1 3 1234,2345,3456
 - pair-up   : pair 成功后自动启动 stream
 - up/down   : 启停长期 stream 容器
 - ensure-up : 若容器已运行则不做任何事；若容器存在但已停止则 start；否则创建并启动
@@ -964,11 +1206,15 @@ usage() {
 - 颜色参数可设置 COLORSPACE/RANGE
 - 编码参数可设置 CODEC/CHROMA/BITDEPTH
 - 交互创建时会显示默认值与说明:
-  - WIDTH=1280, HEIGHT=720, FPS=60
+  - WIDTH=1024, HEIGHT=768, FPS=30
   - BITRATE=10000, PACKET_SIZE=1024
-  - COLORSPACE=709, RANGE=limited
-  - CODEC=h264, CHROMA=420, BITDEPTH=8
+  - COLORSPACE=709, RANGE=full
+  - CODEC=hevc, CHROMA=444, BITDEPTH=8
   - SKIP_MODE_CHECK=1
+- 当前批量模板默认还包括:
+  - CONTROL_BIND=0.0.0.0
+  - TCP_HOST=127.0.0.1
+  - TCP_PORT=9000
 - 也可通过环境变量统一设置默认值:
   - ML_WORKER_DEFAULT_WIDTH
   - ML_WORKER_DEFAULT_HEIGHT
@@ -1009,11 +1255,23 @@ main() {
                 create_worker_noninteractive \
                     "$2" "$3" "${4:-Desktop}" "${5:-$DEFAULT_IMAGE}" "${6:-$DEFAULT_WORKER_BIN}" \
                     "${7:-127.0.0.1}" "${8:-}" "${9:-}" "${10:-127.0.0.1}" "${11:-}" \
-                    "${12:-1280}" "${13:-720}" "${14:-60}" "${15:-10000}" "${16:-1024}" \
-                    "${17:-709}" "${18:-limited}" "${19:-h264}" "${20:-420}" "${21:-8}" "${22:-1}"
+                    "${12:-1024}" "${13:-768}" "${14:-30}" "${15:-10000}" "${16:-1024}" \
+                    "${17:-709}" "${18:-full}" "${19:-hevc}" "${20:-444}" "${21:-8}" "${22:-1}"
             else
                 create_worker_interactive "${2:-}"
             fi
+            ;;
+        batch-add|batch_add|batch)
+            [[ $# -ge 2 ]] || { usage; exit 1; }
+            create_workers_batch \
+                "$2" "${3:-1}" "${4:-10}" "${5:-Desktop}" "${6:-$DEFAULT_IMAGE}" "${7:-$DEFAULT_WORKER_BIN}" \
+                "${8:-127.0.0.1}" "${9:-9000}" "${10:-0.0.0.0}" \
+                "${11:-1024}" "${12:-768}" "${13:-30}" "${14:-10000}" "${15:-1024}" \
+                "${16:-709}" "${17:-full}" "${18:-hevc}" "${19:-444}" "${20:-8}" "${21:-1}"
+            ;;
+        batch-add-ips|batch_add_ips|batch-ips|batch_ips)
+            [[ $# -ge 2 ]] || { usage; exit 1; }
+            create_workers_from_ip_list "${@:2}"
             ;;
         status)
             if [[ $# -ge 2 ]]; then
@@ -1025,6 +1283,10 @@ main() {
         pair)
             [[ $# -ge 2 ]] || { usage; exit 1; }
             pair_worker "$2" "${3:-}"
+            ;;
+        batch-pair|batch_pair)
+            [[ $# -ge 3 ]] || { usage; exit 1; }
+            batch_pair_workers "$2" "$3" "${4:-}"
             ;;
         pair-up)
             [[ $# -ge 2 ]] || { usage; exit 1; }

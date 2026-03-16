@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <sys/time.h>
 #include <time.h>
+#include <ctype.h>
 
 #define DEFAULT_RECV_BUF_SIZE (1024 * 1024)  /* 1MB接收缓冲区 */
 #define RECV_TIMEOUT_SEC 5
@@ -107,24 +108,25 @@ static int recv_exact(int fd, uint8_t* buf, size_t n) {
 static int g_stress_test_enabled = 0;
 static int g_stress_test_copies = 20;
 
+typedef struct {
+    int valid;
+    char ip[64];
+    uint16_t port;
+} WorkerCtrlEndpoint;
+
+static WorkerCtrlEndpoint g_worker_ctrl_map[MAX_STREAMS + 1];
+static pthread_once_t g_worker_ctrl_map_once = PTHREAD_ONCE_INIT;
+
 static uint64_t monotonic_ns_server(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-static int request_idr_best_effort_main_path(void) {
-    const char* wip = getenv("ML_WORKER_CTRL_IP");
-    const char* wport = getenv("ML_WORKER_CTRL_PORT");
-    if (!wip || !*wip || !wport || !*wport) {
+static int send_req_idr_to_endpoint(const char* ip, uint16_t port) {
+    if (!ip || !*ip || port == 0) {
         return -1;
     }
-
-    int port = atoi(wport);
-    if (port <= 0 || port > 65535) {
-        return -1;
-    }
-
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
         return -1;
@@ -133,8 +135,8 @@ static int request_idr_best_effort_main_path(void) {
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
-    a.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, wip, &a.sin_addr) != 1) {
+    a.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) {
         close(fd);
         return -1;
     }
@@ -149,6 +151,123 @@ static int request_idr_best_effort_main_path(void) {
     int rc = (int)sendto(fd, &cmd, sizeof(cmd), 0, (struct sockaddr*)&a, sizeof(a));
     close(fd);
     return (rc == (int)sizeof(cmd)) ? 0 : -1;
+}
+
+static void trim_ascii(char* s) {
+    if (!s) return;
+    char* p = s;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) {
+        s[--n] = '\0';
+    }
+}
+
+static void set_worker_ctrl_endpoint(unsigned stream_id, const char* ip, int port) {
+    if (stream_id == 0 || stream_id > MAX_STREAMS || !ip || !*ip || port <= 0 || port > 65535) {
+        return;
+    }
+    g_worker_ctrl_map[stream_id].valid = 1;
+    snprintf(g_worker_ctrl_map[stream_id].ip, sizeof(g_worker_ctrl_map[stream_id].ip), "%s", ip);
+    g_worker_ctrl_map[stream_id].port = (uint16_t)port;
+}
+
+static void parse_worker_ctrl_map_string(const char* map_str) {
+    if (!map_str || !*map_str) {
+        return;
+    }
+
+    char* copy = strdup(map_str);
+    if (!copy) {
+        return;
+    }
+
+    char* saveptr = NULL;
+    for (char* item = strtok_r(copy, ",", &saveptr);
+         item != NULL;
+         item = strtok_r(NULL, ",", &saveptr)) {
+        trim_ascii(item);
+        if (!*item) continue;
+
+        unsigned stream_id = 0;
+        char ip[64] = {0};
+        int port = 0;
+        if (sscanf(item, "%u:%63[^:]:%d", &stream_id, ip, &port) == 3) {
+            set_worker_ctrl_endpoint(stream_id, ip, port);
+        }
+    }
+
+    free(copy);
+}
+
+static void parse_worker_ctrl_map_file(const char* path) {
+    if (!path || !*path) {
+        return;
+    }
+
+    FILE* fp = fopen(path, "r");
+    if (!fp) {
+        fprintf(stderr, "[Server] Failed to open ctrl map file: %s\n", path);
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        trim_ascii(line);
+        if (!line[0] || line[0] == '#') {
+            continue;
+        }
+
+        unsigned stream_id = 0;
+        char ip[64] = {0};
+        int port = 0;
+        if (sscanf(line, "%u %63s %d", &stream_id, ip, &port) == 3 ||
+            sscanf(line, "%u:%63[^:]:%d", &stream_id, ip, &port) == 3) {
+            set_worker_ctrl_endpoint(stream_id, ip, port);
+        }
+    }
+
+    fclose(fp);
+}
+
+static void init_worker_ctrl_map_once(void) {
+    memset(g_worker_ctrl_map, 0, sizeof(g_worker_ctrl_map));
+    parse_worker_ctrl_map_string(getenv("ML_WORKER_CTRL_MAP"));
+    parse_worker_ctrl_map_file(getenv("ML_WORKER_CTRL_MAP_FILE"));
+}
+
+static int request_idr_best_effort_main_path(uint16_t stream_id) {
+    pthread_once(&g_worker_ctrl_map_once, init_worker_ctrl_map_once);
+
+    if (stream_id > 0 && stream_id <= MAX_STREAMS && g_worker_ctrl_map[stream_id].valid) {
+        return send_req_idr_to_endpoint(g_worker_ctrl_map[stream_id].ip,
+                                        g_worker_ctrl_map[stream_id].port);
+    }
+    return -1;
+}
+
+static void request_idr_for_stream(StreamContext* stream, const char* reason) {
+    if (!stream) {
+        return;
+    }
+
+    const uint64_t now_ns = monotonic_ns_server();
+    const uint64_t request_interval_ns = 1000ull * 1000ull * 1000ull;
+    int should_request = 0;
+
+    pthread_mutex_lock(&stream->lock);
+    if (stream->last_idr_request_ns == 0 ||
+        now_ns - stream->last_idr_request_ns >= request_interval_ns) {
+        stream->last_idr_request_ns = now_ns;
+        should_request = 1;
+    }
+    pthread_mutex_unlock(&stream->lock);
+
+    if (should_request && request_idr_best_effort_main_path(stream->stream_id) == 0) {
+        fprintf(stderr, "[Server] Stream %u requested upstream IDR (%s)\n",
+                stream->stream_id, reason ? reason : "unspecified");
+    }
 }
 
 static void maybe_request_idr_for_no_decode(StreamContext* stream) {
@@ -171,16 +290,15 @@ static void maybe_request_idr_for_no_decode(StreamContext* stream) {
         frames_received >= 30 &&
         (stream->last_idr_request_ns == 0 ||
          now_ns - stream->last_idr_request_ns >= request_interval_ns)) {
-        stream->last_idr_request_ns = now_ns;
         should_request = 1;
     }
     pthread_mutex_unlock(&stream->lock);
 
-    if (should_request && request_idr_best_effort_main_path() == 0) {
-        fprintf(stderr,
-                "[Server] Stream %u decoded=0 after %llu frames, requested upstream IDR\n",
-                stream->stream_id,
-                (unsigned long long)frames_received);
+    if (should_request) {
+        char reason[96];
+        snprintf(reason, sizeof(reason), "decoded=0 after %llu frames",
+                 (unsigned long long)frames_received);
+        request_idr_for_stream(stream, reason);
     }
 }
 
@@ -193,19 +311,6 @@ static void maybe_start_h264_tap(void) {
     int port = atoi(port_env);
     if (port <= 0 || port > 65535) return;
     const char* bind_env = getenv("H264_TAP_BIND");
-
-    /* Optional: allow tap to request IDR from upstream ml_worker on new subscriber.
-     * This is useful when upstream doesn't emit periodic IDRs (late-join black screen).
-     * Configure the ml_worker UDP control endpoint via env vars.
-     */
-    const char* wip = getenv("ML_WORKER_CTRL_IP");
-    const char* wport = getenv("ML_WORKER_CTRL_PORT");
-    if (wip && wport) {
-        int p2 = atoi(wport);
-        if (p2 > 0 && p2 <= 65535) {
-            h264_tap_set_worker_ctrl(wip, (uint16_t)p2);
-        }
-    }
 
     if (h264_tap_start(bind_env ? bind_env : "127.0.0.1", (uint16_t)port) == 0) {
         g_h264_tap_started = 1;
@@ -255,6 +360,10 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                     stream_set_info(stream, &info);
                     stream_set_state(stream, STREAM_STATE_ACTIVE);
                     client->current_stream_id = header->stream_id;
+
+                    pthread_mutex_lock(&stream->lock);
+                    stream->last_idr_request_ns = 0;
+                    pthread_mutex_unlock(&stream->lock);
                     
                     /* 自动检测或强制指定解码器 */
                     DecodeBackend backend = get_decode_backend();
@@ -267,6 +376,14 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                            header->stream_id, info.width, info.height, info.fps,
                            info.codec, info.chroma, info.bitdepth, info.video_format,
                            info.color_space, info.color_range);
+
+                    /*
+                     * Late-join recovery:
+                     * if stream_server starts after ml_worker has already entered steady-state
+                     * HEVC/H264 slices may arrive before a fresh IDR/VPS/SPS/PPS. Request one
+                     * immediately so the decoder can lock without requiring a worker restart.
+                     */
+                    request_idr_for_stream(stream, "stream_start");
                     
                     /* 检查是否启用压力测试模式 */
                     if (g_stress_test_enabled == 0) {

@@ -56,25 +56,39 @@ cd /home/gejun/work/my_ml_work
 
 ## 3. mlctl 部署命令
 
+按 IP 列表批量生成 worker 和 `stream_server` 控制映射文件：
+
+```bash
+cd /home/gejun/work/my_ml_work
+./deploy/mlctl.sh batch-add-ips 192.168.11.150 192.168.11.151 192.168.11.152
+```
+
+从指定起始 `stream_id` 开始：
+
+```bash
+cd /home/gejun/work/my_ml_work
+./deploy/mlctl.sh batch-add-ips --start 5 192.168.11.150,192.168.11.151
+```
+
 启动 worker：
 
 ```bash
 cd /home/gejun/work/my_ml_work
-./deploy/mlctl.sh up worker00
+./deploy/mlctl.sh up worker_150
 ```
 
 重启 worker：
 
 ```bash
 cd /home/gejun/work/my_ml_work
-./deploy/mlctl.sh restart worker00
+./deploy/mlctl.sh restart worker_150
 ```
 
 查看日志：
 
 ```bash
 cd /home/gejun/work/my_ml_work
-./deploy/mlctl.sh logs worker00
+./deploy/mlctl.sh logs worker_150
 ```
 
 ## 4. 当前直接运行命令
@@ -88,10 +102,17 @@ cd /home/gejun/work/my_ml_work/stream_server
   -p 9000 \
   -c 30 \
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
-  --ml-worker-ctrl-ip 127.0.0.1 \
-  --ml-worker-ctrl-port 19000 \
+  --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
 ```
+
+```angular2html
+for f in workers/worker_*.conf; do     ./mlctl.sh up "$(basename "$f" .conf)" 0000;   done
+
+```
+
+
+
 
 ### 4.2 在 192.168.11.31 上启动 ml_worker
 
@@ -106,11 +127,13 @@ cd /home/gejun/work/my_ml_work
   --stream-id 1 \
   --width 1024 \
   --height 768 \
+  --fps 30 \
+  --codec hevc \
   --chroma 444 \
   --colorspace 709 \
   --range full \
-  --control-bind 127.0.0.1 \
-  --control-port 19000
+  --control-bind 0.0.0.0 \
+  --control-port 50001
 ```
 
 ## 4.3 当前代理链启动命令
@@ -153,6 +176,9 @@ cd /home/gejun/work/my_ml_work
 
 ```bash
 printf '%s\n' \
+  deploy/mlctl.sh \
+  deploy/CLI_REFERENCE_CURRENT.md \
+  deploy/BUILD_DEPLOY_COMMANDS_CURRENT.md \
   src/main.c \
   src/tcp_sender.c \
   src/video_callbacks.c \

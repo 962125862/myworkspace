@@ -43,8 +43,8 @@ static void print_usage(const char* prog) {
     printf("  --h264-tap-bind <ip>  H264 tap bind ip (default 127.0.0.1)\n");
     printf("  --h264-tap-stall-ms <ms>  Tap stall threshold (default 200)\n");
     printf("  --h264-tap-drop-idr <0|1> Tap recovery policy (default 1)\n");
-    printf("  --ml-worker-ctrl-ip <ip>   Optional: request upstream IDR on new tap subscriber\n");
-    printf("  --ml-worker-ctrl-port <p>  (requires ml_worker --control-port enabled)\n");
+    printf("  --ml-worker-ctrl-map <map> Per-stream routing, e.g. 1:127.0.0.1:50001,2:127.0.0.1:50002\n");
+    printf("  --ml-worker-ctrl-map-file <path>  File-based per-stream routing; each line: <stream_id> <ip> <port>\n");
     printf("  --help                Show this help\n");
 }
 
@@ -71,8 +71,8 @@ int main(int argc, char* argv[]) {
     char h264_tap_bind[64] = {0};
     int h264_tap_stall_ms = 0;
     int h264_tap_drop_idr = -1;
-    char ml_worker_ctrl_ip[64] = {0};
-    int ml_worker_ctrl_port = 0;
+    char ml_worker_ctrl_map[2048] = {0};
+    char ml_worker_ctrl_map_file[512] = {0};
     
     /* 解析命令行参数 */
     static struct option long_options[] = {
@@ -90,8 +90,8 @@ int main(int argc, char* argv[]) {
         {"h264-tap-bind", required_argument, 0, 1007},
         {"h264-tap-stall-ms", required_argument, 0, 1008},
         {"h264-tap-drop-idr", required_argument, 0, 1009},
-        {"ml-worker-ctrl-ip", required_argument, 0, 1010},
-        {"ml-worker-ctrl-port", required_argument, 0, 1011},
+        {"ml-worker-ctrl-map", required_argument, 0, 1012},
+        {"ml-worker-ctrl-map-file", required_argument, 0, 1013},
         {"help", no_argument, 0, 0},
         {0, 0, 0, 0}
     };
@@ -153,11 +153,11 @@ int main(int argc, char* argv[]) {
             case 1009: /* --h264-tap-drop-idr */
                 h264_tap_drop_idr = atoi(optarg) > 0 ? 1 : 0;
                 break;
-            case 1010: /* --ml-worker-ctrl-ip */
-                strncpy(ml_worker_ctrl_ip, optarg, sizeof(ml_worker_ctrl_ip) - 1);
+            case 1012: /* --ml-worker-ctrl-map */
+                strncpy(ml_worker_ctrl_map, optarg, sizeof(ml_worker_ctrl_map) - 1);
                 break;
-            case 1011: /* --ml-worker-ctrl-port */
-                ml_worker_ctrl_port = atoi(optarg);
+            case 1013: /* --ml-worker-ctrl-map-file */
+                strncpy(ml_worker_ctrl_map_file, optarg, sizeof(ml_worker_ctrl_map_file) - 1);
                 break;
             default:
                 print_usage(argv[0]);
@@ -198,13 +198,11 @@ int main(int argc, char* argv[]) {
     if (h264_tap_drop_idr != -1) {
         setenv("H264_TAP_DROP_IDR", h264_tap_drop_idr ? "1" : "0", 1);
     }
-    if (ml_worker_ctrl_ip[0]) {
-        setenv("ML_WORKER_CTRL_IP", ml_worker_ctrl_ip, 1);
+    if (ml_worker_ctrl_map[0]) {
+        setenv("ML_WORKER_CTRL_MAP", ml_worker_ctrl_map, 1);
     }
-    if (ml_worker_ctrl_port > 0) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%d", ml_worker_ctrl_port);
-        setenv("ML_WORKER_CTRL_PORT", buf, 1);
+    if (ml_worker_ctrl_map_file[0]) {
+        setenv("ML_WORKER_CTRL_MAP_FILE", ml_worker_ctrl_map_file, 1);
     }
     
     /* 注册信号处理 */

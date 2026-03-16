@@ -52,26 +52,25 @@
 - `--tcp-host <ip>`：下游 TCP 接收端地址
 - `--tcp-port <port>`：下游 TCP 接收端端口，默认 `9000`
 - `--stream-id <id>`：流 ID，默认 `1`
-- `--width <n>`：宽度，默认 `1280`
-- `--height <n>`：高度，默认 `720`
-- `--fps <n>`：帧率，默认 `60`
+- `--width <n>`：宽度，默认 `1024`
+- `--height <n>`：高度，默认 `768`
+- `--fps <n>`：帧率，默认 `30`
 - `--bitrate <n>`：码率 kbps，默认 `10000`
 - `--packet-size <n>`：包大小，默认 `1024`
 - `--colorspace <601|709>`：颜色空间，默认 `709`
-- `--range <limited|full>`：颜色范围，默认 `limited`
-- `--codec <h264|hevc|av1>`：请求编码，默认 `h264`
-- `--chroma <420|444>`：色度格式，默认 `420`
+- `--range <limited|full>`：颜色范围，默认 `full`
+- `--codec <h264|hevc|av1>`：请求编码，默认 `hevc`
+- `--chroma <420|444>`：色度格式，默认 `444`
 - `--bitdepth <8|10>`：位深，默认 `8`
 - `--skip-mode-check`：跳过 Sunshine mode 检查，默认开启
 - `--enforce-mode-check`：强制做 mode 检查
-- `--control-bind <ip>`：本地 UDP 控制监听地址，默认 `127.0.0.1`
+- `--control-bind <ip>`：本地 UDP 控制监听地址，默认 `0.0.0.0`
 - `--control-port <port>`：本地 UDP 控制监听端口，默认 `0`（关闭）
 
 当前行为说明：
 
-- 如果没显式指定 `--codec`
-- 且 `--chroma 444`
-- 会自动切到 `hevc`
+- 当前默认参数就是 `1024x768 / 30fps / hevc / 444 / full / skip-mode-check`
+- `mlctl.sh` 当前模板也与这里保持一致
 
 ### 1.4 当前推荐启动参数
 
@@ -85,10 +84,12 @@
   --stream-id 1 \
   --width 1024 \
   --height 768 \
+  --fps 30 \
+  --codec hevc \
   --chroma 444 \
   --colorspace 709 \
   --range full \
-  --control-bind 127.0.0.1 \
+  --control-bind 0.0.0.0 \
   --control-port 19000
 ```
 
@@ -116,8 +117,8 @@
 - `--h264-tap-bind <ip>`：tap 监听地址
 - `--h264-tap-stall-ms <ms>`：tap 堵塞阈值
 - `--h264-tap-drop-idr <0|1>`：tap 恢复策略
-- `--ml-worker-ctrl-ip <ip>`：向上游 `ml_worker` 发控制命令
-- `--ml-worker-ctrl-port <p>`：上游 `ml_worker` 控制端口
+- `--ml-worker-ctrl-map <map>`：按 `stream_id` 路由上游 `REQ_IDR`，格式如 `1:127.0.0.1:50001,2:127.0.0.1:50002`
+- `--ml-worker-ctrl-map-file <path>`：按文件配置 `stream_id -> ip:port` 映射，每行格式 `<stream_id> <ip> <port>`
 
 ### 2.1 当前推荐启动参数
 
@@ -127,8 +128,7 @@
   -p 9000 \
   -c 30 \
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
-  --ml-worker-ctrl-ip 127.0.0.1 \
-  --ml-worker-ctrl-port 19000 \
+  --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
 ```
 
@@ -140,8 +140,7 @@
 - `-p`
 - `-c`
 - `--zmq-bridge-bind`
-- `--ml-worker-ctrl-ip`
-- `--ml-worker-ctrl-port`
+- `--ml-worker-ctrl-map` 或 `--ml-worker-ctrl-map-file`
 - `-v`
 
 ## 3. strem_agent_server
@@ -173,9 +172,22 @@
 
 常用命令：
 
+- `./deploy/mlctl.sh add <worker> <host>`
+- `./deploy/mlctl.sh batch-add <host> [start] [end]`
+- `./deploy/mlctl.sh batch-add-ips <ip1> [ip2] [ip3] ...`
+- `./deploy/mlctl.sh pair <worker> [pin]`
+- `./deploy/mlctl.sh batch-pair <start> <end> [pin|pin1,pin2,...]`
 - `./deploy/mlctl.sh up <worker>`
 - `./deploy/mlctl.sh restart <worker>`
 - `./deploy/mlctl.sh logs <worker>`
+
+当前批量模式：
+
+- `batch-add`：生成 `worker_sN`，默认 `STREAM_ID=N`、`CONTROL_PORT=50000+N`
+- `batch-add-ips`：按输入顺序生成，命名规则 `worker_<ip最后一段>`
+- `batch-add-ips` 会自动写出 `deploy/stream_server_ctrl_map.txt`
+- `batch-pair`：按 `worker_sN` 串行配对；可传一个固定 PIN，也可传逗号分隔的 PIN 列表
+- 生成的 ctrl map 可直接给 `stream_server --ml-worker-ctrl-map-file` 使用
 
 当前有用的 worker 配置字段：
 
@@ -199,3 +211,22 @@
 - `CHROMA`
 - `BITDEPTH`
 - `SKIP_MODE_CHECK`
+
+当前默认模板：
+
+- `APP="Desktop"`
+- `IMAGE="ml-worker:latest"`
+- `TCP_HOST="127.0.0.1"`
+- `TCP_PORT="9000"`
+- `CONTROL_BIND="0.0.0.0"`
+- `WIDTH="1024"`
+- `HEIGHT="768"`
+- `FPS="30"`
+- `BITRATE="10000"`
+- `PACKET_SIZE="1024"`
+- `COLORSPACE="709"`
+- `RANGE="full"`
+- `CODEC="hevc"`
+- `CHROMA="444"`
+- `BITDEPTH="8"`
+- `SKIP_MODE_CHECK="1"`
