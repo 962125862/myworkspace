@@ -78,7 +78,7 @@ typedef struct {
     DecodeStorage storage;       /* CPU 可访问帧 / 硬件帧 */
     int64_t pts;                 /* 展示时间戳 */
     bool key_frame;              /* 是否关键帧 (IDR) */
-    void* _decoder_ctx;          /* 内部使用: 关联的解码器上下文 */
+    void* _decoder_ctx;          /* 内部使用: 硬件帧传输统计上下文，外部不要访问 */
 } DecodedFrame;
 
 /* ==================== 解码器配置 ==================== */

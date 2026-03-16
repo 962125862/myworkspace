@@ -44,8 +44,14 @@ extern "C" {
 /** 单个数据包最大允许大小 (10MB，防止恶意/异常大包) */
 #define TCP_MAX_PACKET_SIZE (10 * 1024 * 1024)
 
-/** 最大并发流数量 (同时支持的视频流路数) */
-#define MAX_STREAMS 20
+/**
+ * 编译期硬上限。
+ * 运行时实际启用多少路由 --max-streams / STREAM_MAX_STREAMS 控制。
+ */
+#define MAX_STREAMS 256
+
+/** 运行时默认启用的流数量 */
+#define DEFAULT_MAX_STREAMS 20
 
 /** 默认 TCP 监听端口 */
 #define DEFAULT_LISTEN_PORT 9000
@@ -79,7 +85,7 @@ typedef struct {
 typedef struct {
     uint32_t length;    /* 包总长度（含头部），已转为主机序 */
     uint8_t  type;      /* 消息类型 (TCP_MSG_TYPE_*) */
-    uint16_t stream_id; /* 流 ID（1 ~ MAX_STREAMS），已转为主机序 */
+    uint16_t stream_id; /* 流 ID（1 ~ MAX_STREAMS 硬上限），已转为主机序 */
 } PacketHeader;
 
 /* ==================== 函数接口 ==================== */

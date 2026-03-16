@@ -19,6 +19,27 @@
 
 static volatile int g_running = 1;
 
+static int parse_int_env_clamped_local(const char* name, int default_value,
+                                       int min_value, int max_value) {
+    const char* value = getenv(name);
+    if (!value || !*value) {
+        return default_value;
+    }
+
+    char* end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || (end && *end != '\0')) {
+        return default_value;
+    }
+    if (parsed < min_value) {
+        return min_value;
+    }
+    if (parsed > max_value) {
+        return max_value;
+    }
+    return (int)parsed;
+}
+
 static void signal_handler(int sig) {
     printf("\n[Main] Received signal %d, shutting down...\n", sig);
     g_running = 0;
@@ -30,6 +51,7 @@ static void print_usage(const char* prog) {
     printf("  -h, --host HOST       Bind host (default: 0.0.0.0)\n");
     printf("  -p, --port PORT       Bind port (default: 9000)\n");
     printf("  -c, --connections N   Max connections (default: 20)\n");
+    printf("      --max-streams N   Runtime active stream slots (default: 20, hard limit: %d)\n", MAX_STREAMS);
     printf("  -s, --stats-interval  Stats print interval in seconds (default: 10)\n");
     printf("  -d, --daemon          Run as daemon\n");
     printf("  -v, --verbose         Verbose output\n");
@@ -54,8 +76,11 @@ int main(int argc, char* argv[]) {
     memset(&config, 0, sizeof(config));
     strncpy(config.bind_host, "0.0.0.0", sizeof(config.bind_host) - 1);
     config.bind_port = DEFAULT_LISTEN_PORT;
-    config.max_connections = MAX_STREAMS;
+    config.max_connections = DEFAULT_MAX_STREAMS;
     config.recv_buffer_size = 1024 * 1024;
+    int runtime_max_streams = parse_int_env_clamped_local("STREAM_MAX_STREAMS",
+                                                          DEFAULT_MAX_STREAMS, 1, MAX_STREAMS);
+    int requested_connections = config.max_connections;
     
     int stats_interval = 10;
     int daemon_mode = 0;
@@ -79,6 +104,7 @@ int main(int argc, char* argv[]) {
         {"host", required_argument, 0, 'h'},
         {"port", required_argument, 0, 'p'},
         {"connections", required_argument, 0, 'c'},
+        {"max-streams", required_argument, 0, 1001},
         {"stats-interval", required_argument, 0, 's'},
         {"daemon", no_argument, 0, 'd'},
         {"verbose", no_argument, 0, 'v'},
@@ -107,9 +133,15 @@ int main(int argc, char* argv[]) {
                 config.bind_port = atoi(optarg);
                 break;
             case 'c':
-                config.max_connections = atoi(optarg);
-                if (config.max_connections > MAX_STREAMS) {
-                    config.max_connections = MAX_STREAMS;
+                requested_connections = atoi(optarg);
+                break;
+            case 1001:
+                runtime_max_streams = atoi(optarg);
+                if (runtime_max_streams < 1) {
+                    runtime_max_streams = DEFAULT_MAX_STREAMS;
+                }
+                if (runtime_max_streams > MAX_STREAMS) {
+                    runtime_max_streams = MAX_STREAMS;
                 }
                 break;
             case 's':
@@ -165,9 +197,25 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (requested_connections < 1) {
+        requested_connections = DEFAULT_MAX_STREAMS;
+    }
+    if (requested_connections > MAX_STREAMS) {
+        requested_connections = MAX_STREAMS;
+    }
+    if (requested_connections < runtime_max_streams) {
+        requested_connections = runtime_max_streams;
+    }
+    config.max_connections = requested_connections;
+
     /* Export optional flags to env for backward compatibility.
      * The rest of the codebase currently reads env vars.
      */
+    {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", runtime_max_streams);
+        setenv("STREAM_MAX_STREAMS", buf, 1);
+    }
     if (decode_backend[0]) {
         setenv("DECODE_BACKEND", decode_backend, 1);
     }
@@ -213,6 +261,7 @@ int main(int argc, char* argv[]) {
     printf("  Stream Server - Multi-Stream Receiver\n");
     printf("========================================\n");
     printf("Bind: %s:%d\n", config.bind_host, config.bind_port);
+    printf("Max streams: %d (hard limit: %d)\n", runtime_max_streams, MAX_STREAMS);
     printf("Max connections: %d\n", config.max_connections);
     printf("Stats interval: %ds\n", stats_interval);
     printf("========================================\n\n");
@@ -233,7 +282,7 @@ int main(int argc, char* argv[]) {
     
     /* 初始化流管理器 */
     StreamManager stream_mgr;
-    if (stream_manager_init(&stream_mgr) < 0) {
+    if (stream_manager_init(&stream_mgr, (uint16_t)runtime_max_streams) < 0) {
         fprintf(stderr, "[Main] Failed to init stream manager\n");
         return 1;
     }

@@ -106,6 +106,7 @@
 - `-h, --host <HOST>`：监听地址
 - `-p, --port <PORT>`：监听端口，默认 `9000`
 - `-c, --connections <N>`：最大连接数，默认 `20`
+- `--max-streams <N>`：运行时启用的最大流数，默认 `20`，编译期硬上限 `256`
 - `-s, --stats-interval <sec>`：统计输出间隔，默认 `10`
 - `-d, --daemon`：守护进程
 - `-v, --verbose`：更详细日志
@@ -126,18 +127,53 @@
 ./stream_server/build/stream_server \
   -h 0.0.0.0 \
   -p 9000 \
+  --max-streams 20 \
   -c 30 \
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
 ```
 
-### 2.2 当前主链路真正使用的参数
+### 2.2 启动环境变量
+
+当前和路数规模相关的推荐做法是：
+
+- 用 `--max-streams <N>` 控制实际启用的流槽位
+- 或用 `STREAM_MAX_STREAMS=<N>` 通过环境变量控制
+- 用 `-c <N>` 控制允许的 TCP 连接数
+
+两者区别：
+
+- `--max-streams` 决定可接受的 `stream_id` 范围，以及 `StreamManager` 实际启用多少路
+- `STREAM_MAX_STREAMS` 是 `--max-streams` 的环境变量等价入口，适合 `systemd`
+- `-c` 只决定同时允许多少 TCP 连接，通常可以比 `--max-streams` 略大，给重连抖动留余量
+- 程序会自动保证 `connections >= max-streams`，避免只改了路数却忘了改连接数
+
+兼容性说明：
+
+- 编译期硬上限已经放宽到 `256`
+- 以后 `20 -> 35 -> 48` 这类扩容，优先改启动参数，不需要每次改代码重编
+- 如果要超过 `256`，才需要再次改代码
+和 NVDEC 保帧逻辑相关的环境变量是：
+
+- `STREAM_DEFER_HW_DOWNLOAD`
+  - 默认 `on`
+  - 作用：硬解时 `last_frame` 默认保留为硬件帧引用，不在每次 decode 后立刻 `GPU -> CPU` 下载
+  - 取图时（当前主要是 ZMQ `GET_LATEST_BGR`）再按需 `av_hwframe_transfer_data()` 下载并转 `BGR24`
+- `STREAM_NVDEC_EXTRA_HW_FRAMES`
+  - 默认：`STREAM_DEFER_HW_DOWNLOAD=on` 时为 `24`，关闭延迟下载时为 `8`
+  - 作用：给 NVDEC/VAAPI 多留一些硬件 surface 余量，避免 `last_frame` 仍持有硬件帧引用时把帧池顶满
+
+- 如果你不显式设置这两个环境变量，默认就已经按新逻辑运行
+- 如果想恢复旧行为，可以启动前设置 `STREAM_DEFER_HW_DOWNLOAD=off`
+
+### 2.3 当前主链路真正使用的参数
 
 当前 `ml_worker -> stream_server -> ZMQ` 主链路里，核心只需要：
 
 - `-h`
 - `-p`
+- `--max-streams`
 - `-c`
 - `--zmq-bridge-bind`
 - `--ml-worker-ctrl-map` 或 `--ml-worker-ctrl-map-file`

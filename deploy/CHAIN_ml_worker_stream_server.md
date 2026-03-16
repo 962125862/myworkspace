@@ -16,7 +16,7 @@ Sunshine Host
   -> TCP TLV (stream_start + video_data)
   -> stream_server
   -> decode
-  -> last_frame
+  -> last_frame (CPU frame or HW frame ref)
   -> ZMQ GET_LATEST_BGR
   -> client (cv2.imshow / 其他消费者)
 ```
@@ -87,7 +87,8 @@ color_range
 - 按 `stream_id` 管理多路流
 - 根据 `STREAM_START` 里的元信息选择解码后端
 - 解码后只保留每路 `last_frame`
-- 在收到 ZMQ 请求时把 `last_frame` 现转成 `BGR24`
+- 默认优先保留硬件帧引用，不在每帧 decode 后立刻下载
+- 在收到 ZMQ 请求时，如果 `last_frame` 还在 GPU 上，则先按需下载到 CPU，再转成 `BGR24`
 
 ## 5. 解码路由与回退顺序
 
@@ -129,6 +130,9 @@ color_range
 
 - bind：`tcp://0.0.0.0:5566`
 - 命令：`GET_LATEST_BGR`
+- 行为：请求时从对应流的 `last_frame` 生成一帧 `BGR24`
+  - `last_frame` 是 CPU 帧时，直接做 libyuv 转换
+  - `last_frame` 是硬件帧时，先 `av_hwframe_transfer_data()` 下载，再做 libyuv 转换
 
 返回 multipart：
 
@@ -165,7 +169,27 @@ color_range
   选择 libyuv 矩阵
 - 对外统一输出 `BGR24`
 
-## 9. 当前验证过的运行形态
+## 9. 与启动参数相关的新默认值
+
+当前默认启用：
+
+- `STREAM_MAX_STREAMS=20`
+- `STREAM_DEFER_HW_DOWNLOAD=on`
+- `STREAM_NVDEC_EXTRA_HW_FRAMES=24`
+
+含义：
+
+- 硬解路径默认不再“每解一帧就下载一帧”
+- 改为只保留最后一帧的硬件引用
+- 只有真正有人取图时才发生 `GPU -> CPU` 下载
+- 同时给 NVDEC/VAAPI 增加 surface 余量，避免因为保留 `last_frame` 而卡住帧池
+- 路数扩容优先改 `--max-streams` 或 `STREAM_MAX_STREAMS`，不需要每次改代码重编
+
+如需恢复旧行为，可设置：
+
+- `STREAM_DEFER_HW_DOWNLOAD=off`
+
+## 10. 当前验证过的运行形态
 
 已验证的一条工作链路：
 
@@ -174,4 +198,3 @@ color_range
 - 色彩：`BT.709 + full`
 - 解码：`NVIDIA`
 - 输出：ZMQ `BGR24`
-

@@ -33,6 +33,13 @@
 /* 最大帧缓冲数 (参考 embedded) */
 #define MAX_SURFACES 16
 
+typedef struct DecoderTransferStats {
+    pthread_mutex_t lock;
+    unsigned refcount;
+    uint64_t hw_transfer_count;
+    double total_hw_transfer_time;
+} DecoderTransferStats;
+
 /* 解码器上下文 */
 struct DecoderCtx {
     DecoderConfig config;
@@ -66,7 +73,7 @@ struct DecoderCtx {
     /* 统计 */
     DecoderStats stats;
     double total_decode_time;
-    double total_hw_transfer_time;
+    DecoderTransferStats* transfer_stats;
 };
 
 static pthread_mutex_t g_cuda_device_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -80,15 +87,79 @@ static double elapsed_ms_since(const struct timespec* start,
            (end->tv_nsec - start->tv_nsec) / 1000000.0;
 }
 
-static void record_hw_transfer_time(DecoderCtx* ctx, double transfer_ms) {
-    if (!ctx) {
+static DecoderTransferStats* transfer_stats_create(void) {
+    DecoderTransferStats* stats = calloc(1, sizeof(*stats));
+    if (!stats) {
+        return NULL;
+    }
+
+    pthread_mutex_init(&stats->lock, NULL);
+    stats->refcount = 1;
+    return stats;
+}
+
+static void transfer_stats_ref(DecoderTransferStats* stats) {
+    if (!stats) {
         return;
     }
 
-    ctx->stats.hw_transfer_count++;
-    ctx->total_hw_transfer_time += transfer_ms;
-    ctx->stats.avg_hw_transfer_time_ms =
-        ctx->total_hw_transfer_time / (double)ctx->stats.hw_transfer_count;
+    pthread_mutex_lock(&stats->lock);
+    stats->refcount++;
+    pthread_mutex_unlock(&stats->lock);
+}
+
+static void transfer_stats_unref(DecoderTransferStats** stats_ptr) {
+    if (!stats_ptr || !*stats_ptr) {
+        return;
+    }
+
+    DecoderTransferStats* stats = *stats_ptr;
+    bool destroy = false;
+
+    pthread_mutex_lock(&stats->lock);
+    if (stats->refcount > 0) {
+        stats->refcount--;
+    }
+    destroy = (stats->refcount == 0);
+    pthread_mutex_unlock(&stats->lock);
+
+    if (destroy) {
+        pthread_mutex_destroy(&stats->lock);
+        free(stats);
+    }
+
+    *stats_ptr = NULL;
+}
+
+static void record_hw_transfer_time(DecoderTransferStats* stats, double transfer_ms) {
+    if (!stats) {
+        return;
+    }
+
+    pthread_mutex_lock(&stats->lock);
+    stats->hw_transfer_count++;
+    stats->total_hw_transfer_time += transfer_ms;
+    pthread_mutex_unlock(&stats->lock);
+}
+
+static void snapshot_hw_transfer_stats(DecoderTransferStats* stats, DecoderStats* out) {
+    if (!out) {
+        return;
+    }
+
+    out->hw_transfer_count = 0;
+    out->avg_hw_transfer_time_ms = 0.0;
+    if (!stats) {
+        return;
+    }
+
+    pthread_mutex_lock(&stats->lock);
+    out->hw_transfer_count = stats->hw_transfer_count;
+    if (stats->hw_transfer_count > 0) {
+        out->avg_hw_transfer_time_ms =
+            stats->total_hw_transfer_time / (double)stats->hw_transfer_count;
+    }
+    pthread_mutex_unlock(&stats->lock);
 }
 
 static const char* codec_name_from_id(enum AVCodecID codec_id) {
@@ -429,7 +500,7 @@ static int copy_cpu_frame_data(const DecodedFrame* src, DecodedFrame* dst) {
     return 0;
 }
 
-static int decoded_frame_set_avframe(DecodedFrame* frame, DecoderCtx* ctx,
+static int decoded_frame_set_avframe(DecodedFrame* frame, DecoderTransferStats* transfer_stats,
                                      AVFrame* avf, DecodeStorage storage,
                                      bool take_ownership) {
     if (!frame || !avf) {
@@ -445,7 +516,7 @@ static int decoded_frame_set_avframe(DecodedFrame* frame, DecoderCtx* ctx,
     }
 
     frame->av_frame = owned;
-    frame->_decoder_ctx = ctx;
+    frame->_decoder_ctx = NULL;
     frame->width = owned->width;
     frame->height = owned->height;
     frame->pts = owned->pts;
@@ -459,6 +530,10 @@ static int decoded_frame_set_avframe(DecodedFrame* frame, DecoderCtx* ctx,
             frame->linesize[i] = owned->linesize[i];
         }
     } else {
+        if (transfer_stats) {
+            transfer_stats_ref(transfer_stats);
+            frame->_decoder_ctx = transfer_stats;
+        }
         memset(frame->data, 0, sizeof(frame->data));
         memset(frame->linesize, 0, sizeof(frame->linesize));
     }
@@ -471,6 +546,11 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
     if (!ctx) return NULL;
     
     memcpy(&ctx->config, config, sizeof(*config));
+    ctx->transfer_stats = transfer_stats_create();
+    if (!ctx->transfer_stats) {
+        free(ctx);
+        return NULL;
+    }
     
     enum AVCodecID codec_id = config->codec_id ? config->codec_id : AV_CODEC_ID_H264;
 
@@ -485,7 +565,7 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
             ctx->codec = avcodec_find_decoder(codec_id);
             if (!ctx->codec) {
                 fprintf(stderr, "[Decoder] %s decoder not found\n", codec_name_from_id(codec_id));
-                free(ctx);
+                decoder_destroy(ctx);
                 return NULL;
             }
             printf("[Decoder] Using %s decoder with VA-API hwaccel\n", codec_name_from_id(codec_id));
@@ -495,7 +575,7 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
             ctx->codec = avcodec_find_decoder(codec_id);
             if (!ctx->codec) {
                 fprintf(stderr, "[Decoder] %s decoder not found\n", codec_name_from_id(codec_id));
-                free(ctx);
+                decoder_destroy(ctx);
                 return NULL;
             }
             printf("[Decoder] Using %s decoder with CUDA hwaccel\n", codec_name_from_id(codec_id));
@@ -508,13 +588,13 @@ DecoderCtx* decoder_create(const DecoderConfig* config) {
     
     if (!ctx->codec) {
         fprintf(stderr, "[Decoder] %s decoder not found\n", codec_name_from_id(codec_id));
-        free(ctx);
+        decoder_destroy(ctx);
         return NULL;
     }
     
     ctx->codec_ctx = avcodec_alloc_context3(ctx->codec);
     if (!ctx->codec_ctx) {
-        free(ctx);
+        decoder_destroy(ctx);
         return NULL;
     }
     
@@ -552,6 +632,9 @@ void decoder_destroy(DecoderCtx* ctx) {
         release_shared_cuda_device();
     }
     if (ctx->sws_ctx) sws_freeContext(ctx->sws_ctx);
+    if (ctx->transfer_stats) {
+        transfer_stats_unref(&ctx->transfer_stats);
+    }
     
     free(ctx);
 }
@@ -840,7 +923,8 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                         ctx->stats.frames_dropped++;
                         continue;
                     }
-                    record_hw_transfer_time(ctx, elapsed_ms_since(&xfer_start, &xfer_end));
+                    record_hw_transfer_time(ctx->transfer_stats,
+                                            elapsed_ms_since(&xfer_start, &xfer_end));
 
                     av_frame_copy_props(tmp_frame, ctx->frame);
                     out_avf = tmp_frame;
@@ -848,7 +932,8 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                 }
             }
 
-            if (decoded_frame_set_avframe(frame, ctx, out_avf, storage, take_ownership) != 0) {
+            if (decoded_frame_set_avframe(frame, ctx->transfer_stats, out_avf,
+                                          storage, take_ownership) != 0) {
                 if (take_ownership) {
                     av_frame_free(&out_avf);
                 }
@@ -887,6 +972,7 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
 
 void decoder_free_frame(DecodedFrame* frame) {
     if (!frame) return;
+    DecoderTransferStats* transfer_stats = (DecoderTransferStats*)frame->_decoder_ctx;
     
     /* 零拷贝模式：释放 AVFrame 引用 */
     if (frame->av_frame) {
@@ -900,6 +986,8 @@ void decoder_free_frame(DecodedFrame* frame) {
         }
     }
     
+    transfer_stats_unref(&transfer_stats);
+    frame->_decoder_ctx = NULL;
     free(frame);
 }
 
@@ -919,10 +1007,9 @@ DecodedFrame* decoder_ref_frame(const DecodedFrame* src) {
     dst->key_frame = src->key_frame;
     dst->format = src->format;
     dst->storage = src->storage;
-    dst->_decoder_ctx = src->_decoder_ctx;
 
     if (src->av_frame) {
-        if (decoded_frame_set_avframe(dst, (DecoderCtx*)src->_decoder_ctx,
+        if (decoded_frame_set_avframe(dst, (DecoderTransferStats*)src->_decoder_ctx,
                                       (AVFrame*)src->av_frame, src->storage, false) != 0) {
             free(dst);
             return NULL;
@@ -972,7 +1059,7 @@ int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame)
         av_frame_free(&sw_frame);
         return -1;
     }
-    record_hw_transfer_time((DecoderCtx*)src->_decoder_ctx,
+    record_hw_transfer_time((DecoderTransferStats*)src->_decoder_ctx,
                             elapsed_ms_since(&xfer_start, &xfer_end));
     av_frame_copy_props(sw_frame, hw_frame);
 
@@ -982,7 +1069,7 @@ int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame)
         return -1;
     }
 
-    if (decoded_frame_set_avframe(dst, (DecoderCtx*)src->_decoder_ctx,
+    if (decoded_frame_set_avframe(dst, NULL,
                                   sw_frame, DECODE_STORAGE_CPU, true) != 0) {
         av_frame_free(&sw_frame);
         free(dst);
@@ -1040,14 +1127,16 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
                 return -1;
             }
             clock_gettime(CLOCK_MONOTONIC, &xfer_end);
-            record_hw_transfer_time(ctx, elapsed_ms_since(&xfer_start, &xfer_end));
+            record_hw_transfer_time(ctx->transfer_stats,
+                                    elapsed_ms_since(&xfer_start, &xfer_end));
             av_frame_copy_props(tmp_frame, ctx->frame);
             out_avf = tmp_frame;
             take_ownership = true;
         }
     }
 
-    if (decoded_frame_set_avframe(frame, ctx, out_avf, storage, take_ownership) != 0) {
+    if (decoded_frame_set_avframe(frame, ctx->transfer_stats, out_avf,
+                                  storage, take_ownership) != 0) {
         if (take_ownership) {
             av_frame_free(&out_avf);
         }
@@ -1143,6 +1232,7 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
 void decoder_get_stats(DecoderCtx* ctx, DecoderStats* stats) {
     if (!ctx || !stats) return;
     memcpy(stats, &ctx->stats, sizeof(*stats));
+    snapshot_hw_transfer_stats(ctx->transfer_stats, stats);
 }
 
 int decoder_get_nvidia_stats(int device_id, GPUStats* stats) {

@@ -189,14 +189,18 @@ static int stream_nvdec_extra_hw_frames(void) {
     return cached;
 }
 
-int stream_manager_init(StreamManager* mgr) {
+int stream_manager_init(StreamManager* mgr, uint16_t max_streams) {
     if (!mgr) {
+        return -1;
+    }
+    if (max_streams < 1 || max_streams > MAX_STREAMS) {
         return -1;
     }
     
     memset(mgr, 0, sizeof(*mgr));
+    mgr->max_streams = max_streams;
     
-    for (int i = 0; i < MAX_STREAMS; i++) {
+    for (uint16_t i = 0; i < mgr->max_streams; i++) {
         StreamContext* stream = &mgr->streams[i];
         stream->stream_id = i + 1;  /* stream_id 从1开始 */
         snprintf(stream->name, sizeof(stream->name), "stream_%02d", i + 1);
@@ -219,7 +223,7 @@ void stream_manager_destroy(StreamManager* mgr) {
     }
 
     /* 关闭所有流的解码器 */
-    for (int i = 0; i < MAX_STREAMS; i++) {
+    for (uint16_t i = 0; i < mgr->max_streams; i++) {
         StreamContext* stream = &mgr->streams[i];
         stream_close_decoder(stream);
         pthread_mutex_destroy(&stream->lock);
@@ -229,7 +233,7 @@ void stream_manager_destroy(StreamManager* mgr) {
 }
 
 StreamContext* stream_manager_get(StreamManager* mgr, uint16_t stream_id) {
-    if (!mgr || stream_id < 1 || stream_id > MAX_STREAMS) {
+    if (!mgr || stream_id < 1 || stream_id > mgr->max_streams) {
         return NULL;
     }
     
@@ -296,7 +300,7 @@ void stream_manager_print_stats(StreamManager* mgr) {
     
     pthread_mutex_lock(&mgr->lock);
     
-    for (int i = 0; i < MAX_STREAMS; i++) {
+    for (uint16_t i = 0; i < mgr->max_streams; i++) {
         StreamContext* stream = &mgr->streams[i];
         
         pthread_mutex_lock(&stream->lock);
@@ -580,7 +584,7 @@ static void* stress_decode_worker(void* arg) {
 
 int stream_manager_start_stress_test(StreamManager* mgr, uint16_t source_stream_id,
                                       int num_copies, DecodeBackend backend) {
-    if (!mgr || num_copies < 1 || num_copies > MAX_STREAMS) {
+    if (!mgr || num_copies < 1 || num_copies > mgr->max_streams) {
         fprintf(stderr, "[StressTest] Invalid parameters\n");
         return -1;
     }
@@ -616,7 +620,7 @@ int stream_manager_start_stress_test(StreamManager* mgr, uint16_t source_stream_
         int stream_id = i + 1;
         if (stream_id >= source_stream_id) stream_id++;
         
-        if (stream_id > MAX_STREAMS) {
+        if (stream_id > mgr->max_streams) {
             fprintf(stderr, "[StressTest] Not enough stream slots available\n");
             break;
         }

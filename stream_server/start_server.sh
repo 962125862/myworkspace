@@ -6,7 +6,7 @@ set -e
 
 # 配置
 PORT=19000
-MAX_STREAMS=20
+MAX_STREAMS="${MAX_STREAMS:-20}"
 STATS_INTERVAL=5
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)/build"
 
@@ -79,4 +79,4 @@ log "按 Ctrl+C 停止服务器"
 log ""
 
 cd "$BUILD_DIR"
-exec ./stream_server -p $PORT -c $MAX_STREAMS -s $STATS_INTERVAL -v
+exec ./stream_server --max-streams "$MAX_STREAMS" -p "$PORT" -c "$MAX_STREAMS" -s "$STATS_INTERVAL" -v

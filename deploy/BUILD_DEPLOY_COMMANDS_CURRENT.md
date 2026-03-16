@@ -100,11 +100,45 @@ cd /home/gejun/work/my_ml_work/stream_server
 ./build/stream_server \
   -h 0.0.0.0 \
   -p 9000 \
+  --max-streams 20 \
   -c 30 \
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
 ```
+
+当前这条启动命令默认已经启用新逻辑，不需要额外加 CLI：
+
+- `STREAM_DEFER_HW_DOWNLOAD=on`
+- `STREAM_NVDEC_EXTRA_HW_FRAMES=24`
+
+这里补充一条：
+
+- `--max-streams 20`：实际启用 20 路流槽位
+- `-c 30`：允许 30 个 TCP 连接，给重连抖动留余量
+- 如果 `-c` 小于 `--max-streams`，程序会自动把连接数抬到 `--max-streams`
+
+以后如果只是从 20 路扩到 35 路，优先改成：
+
+```bash
+--max-streams 35 -c 48
+```
+
+不需要再去改代码里的 `MAX_STREAMS` 重编；当前编译期硬上限已经预留到 `256`。
+
+如果是 `systemd` 启动，想显式覆盖这两个值，可以在 unit 或 drop-in 里加：
+
+```ini
+Environment=STREAM_MAX_STREAMS=20
+Environment=STREAM_DEFER_HW_DOWNLOAD=off
+Environment=STREAM_NVDEC_EXTRA_HW_FRAMES=8
+```
+
+含义：
+
+- `STREAM_DEFER_HW_DOWNLOAD=on`：硬解后默认保留 `last_frame` 的硬件帧引用，取图时再下载
+- `STREAM_NVDEC_EXTRA_HW_FRAMES`：给 NVDEC/VAAPI 多留硬件 surface，避免保留 `last_frame` 时帧池被占满
+- `STREAM_MAX_STREAMS`：运行时启用的流槽位数量；扩容时优先改它，而不是改代码重编
 
 ```angular2html
 for f in workers/worker_*.conf; do     ./mlctl.sh up "$(basename "$f" .conf)" 0000;   done

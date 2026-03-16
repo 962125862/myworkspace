@@ -11,8 +11,8 @@
  *   - 解码统计 (FPS/延迟/丢帧)
  *   - 最后一帧缓存 (供按需导出/桥接使用)
  *
- * 流管理器 (StreamManager) 维护固定大小的流数组 (MAX_STREAMS)，
- * 并提供压力测试功能: 将一路实时流复制到 N 个虚拟流并行解码。
+ * 流管理器 (StreamManager) 在编译期硬上限 MAX_STREAMS 内，
+ * 维护运行时 max_streams 个有效流槽位，并提供压力测试功能。
  *
  * 线程安全:
  *   - StreamManager 有全局锁 (mgr->lock)
@@ -70,7 +70,7 @@ typedef struct {
  * 每个 StreamContext 有独立的 mutex 保护，支持多线程并发访问。
  */
 typedef struct {
-    uint16_t stream_id;            /* 流 ID (1 ~ MAX_STREAMS) */
+    uint16_t stream_id;            /* 流 ID (1 ~ max_streams，硬上限见 MAX_STREAMS) */
     char name[32];                 /* 可读名称 (如 "stream_01") */
     StreamState state;             /* 当前状态 */
 
@@ -133,11 +133,12 @@ typedef struct {
 /**
  * @brief 全局流管理器
  *
- * 维护 MAX_STREAMS 个流槽位，按 stream_id (1-based) 索引。
+ * 编译期预留 MAX_STREAMS 个槽位，运行时只启用前 max_streams 个。
  * 流管理器由 main.c 栈上分配，生命周期覆盖整个进程。
  */
 typedef struct {
     StreamContext streams[MAX_STREAMS]; /* 流数组 (stream_id - 1 作索引) */
+    uint16_t max_streams;              /* 运行时启用的最大流数 */
     uint32_t active_count;             /* 活跃流数量 */
     pthread_mutex_t lock;              /* 全局锁 (保护 stress_test 等) */
     StressTestConfig stress_test;      /* 压力测试配置 */
@@ -145,8 +146,8 @@ typedef struct {
 
 /* ==================== 流管理器 API ==================== */
 
-/** 初始化流管理器 (初始化所有流槽位和锁) */
-int stream_manager_init(StreamManager* mgr);
+/** 初始化流管理器 (初始化前 max_streams 个有效槽位和锁) */
+int stream_manager_init(StreamManager* mgr, uint16_t max_streams);
 
 /** 销毁流管理器 (关闭所有解码器，销毁所有 mutex，释放资源) */
 void stream_manager_destroy(StreamManager* mgr);

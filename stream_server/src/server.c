@@ -106,7 +106,7 @@ static int recv_exact(int fd, uint8_t* buf, size_t n) {
 
 /* 压力测试模式开关（通过环境变量控制） */
 static int g_stress_test_enabled = 0;
-static int g_stress_test_copies = 20;
+static int g_stress_test_copies = DEFAULT_MAX_STREAMS;
 
 typedef struct {
     int valid;
@@ -116,6 +116,26 @@ typedef struct {
 
 static WorkerCtrlEndpoint g_worker_ctrl_map[MAX_STREAMS + 1];
 static pthread_once_t g_worker_ctrl_map_once = PTHREAD_ONCE_INIT;
+
+static int server_runtime_max_streams(void) {
+    const char* value = getenv("STREAM_MAX_STREAMS");
+    if (!value || !*value) {
+        return DEFAULT_MAX_STREAMS;
+    }
+
+    char* end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || (end && *end != '\0')) {
+        return DEFAULT_MAX_STREAMS;
+    }
+    if (parsed < 1) {
+        return 1;
+    }
+    if (parsed > MAX_STREAMS) {
+        return MAX_STREAMS;
+    }
+    return (int)parsed;
+}
 
 static uint64_t monotonic_ns_server(void) {
     struct timespec ts;
@@ -165,7 +185,9 @@ static void trim_ascii(char* s) {
 }
 
 static void set_worker_ctrl_endpoint(unsigned stream_id, const char* ip, int port) {
-    if (stream_id == 0 || stream_id > MAX_STREAMS || !ip || !*ip || port <= 0 || port > 65535) {
+    const int runtime_max_streams = server_runtime_max_streams();
+    if (stream_id == 0 || stream_id > (unsigned)runtime_max_streams ||
+        !ip || !*ip || port <= 0 || port > 65535) {
         return;
     }
     g_worker_ctrl_map[stream_id].valid = 1;
@@ -240,7 +262,8 @@ static void init_worker_ctrl_map_once(void) {
 static int request_idr_best_effort_main_path(uint16_t stream_id) {
     pthread_once(&g_worker_ctrl_map_once, init_worker_ctrl_map_once);
 
-    if (stream_id > 0 && stream_id <= MAX_STREAMS && g_worker_ctrl_map[stream_id].valid) {
+    const int runtime_max_streams = server_runtime_max_streams();
+    if (stream_id > 0 && stream_id <= runtime_max_streams && g_worker_ctrl_map[stream_id].valid) {
         return send_req_idr_to_endpoint(g_worker_ctrl_map[stream_id].ip,
                                         g_worker_ctrl_map[stream_id].port);
     }
@@ -393,8 +416,12 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                             const char* copies_env = getenv("STRESS_COPIES");
                             if (copies_env) {
                                 g_stress_test_copies = atoi(copies_env);
-                                if (g_stress_test_copies < 1) g_stress_test_copies = 20;
-                                if (g_stress_test_copies > MAX_STREAMS) g_stress_test_copies = MAX_STREAMS;
+                                if (g_stress_test_copies < 1) {
+                                    g_stress_test_copies = DEFAULT_MAX_STREAMS;
+                                }
+                                if (g_stress_test_copies > server_runtime_max_streams()) {
+                                    g_stress_test_copies = server_runtime_max_streams();
+                                }
                             }
                             
                             printf("[Server] Enabling stress test mode: %d copies\n", 

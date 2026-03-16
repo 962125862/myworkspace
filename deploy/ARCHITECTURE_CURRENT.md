@@ -37,6 +37,7 @@
 - 初始化解码器
 - 按路由规则选择 `Intel / NVIDIA / CPU`
 - 维护每路 `last_frame`
+- 硬解默认保留 `last_frame` 的硬件帧引用，不立即下载到 CPU
 - 通过内置 ZMQ bridge 输出 `BGR24`
 
 ### 1.4 strem_agent_server
@@ -145,6 +146,11 @@ strem_agent_client
 
 `stream_server` 再据此选择 libyuv 矩阵，把 `last_frame` 转成 `BGR24`。
 
+补充说明：
+
+- 如果 `last_frame` 当前是 CPU 帧，直接做 libyuv 转换
+- 如果 `last_frame` 当前是 NVDEC/VAAPI 硬件帧，先按需下载到 CPU，再做 libyuv 转换
+
 ## 5. ZMQ 架构
 
 当前使用的是 `stream_server` 内置 bridge，不再经过外部 `shm` 进程。
@@ -152,13 +158,34 @@ strem_agent_client
 特点：
 
 - 请求式获取，不主动推流
-- 从 `last_frame` 现转 `BGR24`
+- 从 `last_frame` 按需生成 `BGR24`
+- 默认不会在每帧 decode 后立刻做 `GPU -> CPU` 下载
 - 多个客户端统一走同一个 ZMQ 入口
 
 协议：
 
 - request: `GET_LATEST_BGR`
 - reply: `[status][meta_json][bgr24]`
+
+### 5.1 相关启动环境变量
+
+- `STREAM_MAX_STREAMS`
+  - 默认 `20`
+  - 用于控制运行时实际启用多少路流槽位
+  - 适合 `systemd` 场景通过 `Environment=` 覆盖
+- `STREAM_DEFER_HW_DOWNLOAD`
+  - 默认 `on`
+  - 控制硬解时 `last_frame` 是立即下载成 CPU 帧，还是保留为硬件帧引用
+- `STREAM_NVDEC_EXTRA_HW_FRAMES`
+  - 默认 `24`（延迟下载开启时）
+  - 控制 NVDEC/VAAPI 额外硬件帧池余量，避免保留 `last_frame` 时 surface 不够
+
+### 5.2 路数扩容策略
+
+- 编译期硬上限已预留到 `256`
+- 运行时实际路数优先通过 `--max-streams <N>` 或 `STREAM_MAX_STREAMS=<N>` 调整
+- 不需要再为了 `20 -> 35 -> 48` 这种扩容反复改代码重编
+- `-c/--connections` 只控制 TCP 连接数，建议略高于 `max-streams`，给重连抖动留余量
 
 ## 6. 自动恢复
 

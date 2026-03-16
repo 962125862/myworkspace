@@ -13,7 +13,8 @@
  *
  *   json:
  *     {"stream_id": 1, "timeout_ms": 1000, "request_new": true}
- *   说明：收到请求时，会从对应流的 last_frame 现转 BGR24 并返回。
+ *   说明：收到请求时，会从对应流的 last_frame 按需生成 BGR24 并返回。
+ *        如果 last_frame 还是硬件帧，则先下载到 CPU，再做 libyuv 转换。
  *
  *   Reply multipart (client 看到):
  *     [status][meta_json][bgr24]
@@ -43,7 +44,7 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
 
 /**
  * @brief 保留的 no-op 钩子。
- * @note  当前实现改为“请求时从 last_frame 现转 BGR24”，不再缓存帧。
+ * @note  当前实现改为“请求时从 last_frame 按需生成 BGR24”，不再缓存帧。
  */
 void zmq_bridge_on_new_frame(uint16_t stream_id, const DecodedFrame* frame);
 
