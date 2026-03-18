@@ -24,19 +24,30 @@ fi
 
 docker compose version >/dev/null 2>&1 || { echo "[agent_stack_runtime][ERR] docker compose not available" >&2; exit 1; }
 compose_args=(-f docker-compose.yml)
-if [[ -f docker-compose.local.yml ]]; then
-  compose_args+=(-f docker-compose.local.yml)
-elif [[ -f _build_ctx/docker-compose.local.yml ]]; then
-  compose_args+=(-f _build_ctx/docker-compose.local.yml)
-fi
+use_local=0
 rm_vol=0
 for a in "${@:-}"; do
   case "$a" in
+    --local)
+      use_local=1
+      ;;
     -v|--volumes)
       rm_vol=1
       ;;
   esac
 done
+
+if [[ "${AGENT_STACK_USE_LOCAL:-0}" == "1" ]]; then
+  use_local=1
+fi
+
+if [[ "$use_local" -eq 1 ]]; then
+  if [[ -f docker-compose.local.yml ]]; then
+    compose_args+=(-f docker-compose.local.yml)
+  elif [[ -f _build_ctx/docker-compose.local.yml ]]; then
+    compose_args+=(-f _build_ctx/docker-compose.local.yml)
+  fi
+fi
 
 if [[ "${AGENT_STACK_RM_VOLUMES:-0}" == "1" ]]; then
   rm_vol=1

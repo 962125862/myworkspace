@@ -9,15 +9,29 @@ need_cmd() {
 
 need_cmd docker
 
-mkdir -p config
-
-if [[ ! -f config/strem_agent_server.env ]]; then
-  cp -v config/strem_agent_server.env.example config/strem_agent_server.env
-  echo "[agent_stack_runtime] created config/strem_agent_server.env"
+preview_mode=0
+for a in "${@:-}"; do
+  case "$a" in
+    --dry-run|--preview)
+      preview_mode=1
+      ;;
+  esac
+done
+if [[ "${AGENT_STACK_DRY_RUN:-0}" == "1" ]]; then
+  preview_mode=1
 fi
-if [[ ! -f config/agent_link_service.env ]]; then
-  cp -v config/agent_link_service.env.example config/agent_link_service.env
-  echo "[agent_stack_runtime] created config/agent_link_service.env"
+
+if [[ "$preview_mode" -ne 1 ]]; then
+  mkdir -p config
+
+  if [[ ! -f config/strem_agent_server.env ]]; then
+    cp -v config/strem_agent_server.env.example config/strem_agent_server.env
+    echo "[agent_stack_runtime] created config/strem_agent_server.env"
+  fi
+  if [[ ! -f config/agent_link_service.env ]]; then
+    cp -v config/agent_link_service.env.example config/agent_link_service.env
+    echo "[agent_stack_runtime] created config/agent_link_service.env"
+  fi
 fi
 
 allow_defaults=0
@@ -29,7 +43,12 @@ for a in "${@:-}"; do
   esac
 done
 
-if [[ "$allow_defaults" -ne 1 ]]; then
+have_configs=1
+[[ -f config/strem_agent_server.env && -f config/agent_link_service.env ]] || have_configs=0
+
+if [[ "$preview_mode" -eq 1 && "$have_configs" -eq 0 ]]; then
+  echo "[agent_stack_runtime] dry-run: config files are missing, token validation skipped"
+elif [[ "$allow_defaults" -ne 1 ]]; then
   if grep -qE '^AGENT_LINK_TOKEN=your-static-token\b' config/agent_link_service.env; then
     echo "[agent_stack_runtime][ERR] please edit config/agent_link_service.env: AGENT_LINK_TOKEN is still 'your-static-token'" >&2
     exit 2
@@ -55,9 +74,108 @@ if [[ "$allow_defaults" -ne 1 ]]; then
 fi
 
 # Ensure ML_IMAGE exists in config (so pair/up can work without extra steps).
-if ! grep -qE '^ML_IMAGE=' config/agent_link_service.env; then
+if [[ -f config/agent_link_service.env ]] && ! grep -qE '^ML_IMAGE=' config/agent_link_service.env; then
   echo 'ML_IMAGE=ghcr.io/962125862/myworkspace/ml-worker:latest' >>config/agent_link_service.env
   echo "[agent_stack_runtime] appended ML_IMAGE to config/agent_link_service.env"
+fi
+
+compose_args=(-f docker-compose.yml)
+use_local=0
+
+fresh=0
+pull=1
+dry_run=0
+for a in "${@:-}"; do
+  case "$a" in
+    --local)
+      use_local=1
+      ;;
+    --fresh)
+      fresh=1
+      ;;
+    --no-pull)
+      pull=0
+      ;;
+    --dry-run|--preview)
+      dry_run=1
+      ;;
+  esac
+done
+
+if [[ "${AGENT_STACK_USE_LOCAL:-0}" == "1" ]]; then
+  use_local=1
+fi
+
+if [[ "$use_local" -eq 1 ]]; then
+  if [[ -f docker-compose.local.yml ]]; then
+    compose_args+=(-f docker-compose.local.yml)
+  elif [[ -f _build_ctx/docker-compose.local.yml ]]; then
+    compose_args+=(-f _build_ctx/docker-compose.local.yml)
+  fi
+  pull=0
+fi
+
+if [[ "${AGENT_STACK_FRESH:-0}" == "1" ]]; then
+  fresh=1
+fi
+if [[ "${AGENT_STACK_NO_PULL:-0}" == "1" ]]; then
+  pull=0
+fi
+if [[ "${AGENT_STACK_DRY_RUN:-0}" == "1" ]]; then
+  dry_run=1
+fi
+
+print_plan_summary() {
+  local pull_state="enabled"
+  local local_state="remote GHCR"
+  local compose_desc
+  local token_state="ok"
+  local sk_state="ok"
+  local image_value
+
+  if [[ "$pull" -eq 0 ]]; then
+    pull_state="disabled"
+  fi
+  if [[ "$use_local" -eq 1 ]]; then
+    local_state="local override"
+  fi
+
+  compose_desc="${compose_args[*]}"
+  if [[ -f config/agent_link_service.env ]]; then
+    image_value="$(grep -E '^ML_IMAGE=' config/agent_link_service.env | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)"
+    [[ -n "$image_value" ]] || image_value="(missing)"
+    if grep -qE '^AGENT_LINK_TOKEN=your-static-token\b' config/agent_link_service.env; then
+      token_state="default"
+    fi
+    if grep -qE '^AGENT_LINK_SK=change-me-sk\b' config/agent_link_service.env; then
+      sk_state="default"
+    fi
+  else
+    image_value="(missing config/agent_link_service.env)"
+    token_state="missing"
+    sk_state="missing"
+  fi
+  if [[ -f config/strem_agent_server.env ]] && grep -qE '^AGENT_TOKEN=your-static-token\b' config/strem_agent_server.env; then
+    token_state="default"
+  elif [[ ! -f config/strem_agent_server.env ]]; then
+    token_state="missing"
+  fi
+
+  echo "[agent_stack_runtime] plan:"
+  echo "  mode: $local_state"
+  echo "  pull: $pull_state"
+  echo "  fresh: $fresh"
+  echo "  compose: $compose_desc"
+  echo "  ML_IMAGE: $image_value"
+  echo "  token_state: $token_state"
+  echo "  sk_state: $sk_state"
+}
+
+print_plan_summary
+
+if [[ "$dry_run" -eq 1 ]]; then
+  echo "[agent_stack_runtime] dry-run: skipped docker compose pull/up"
+  exit 0
 fi
 
 # If the current user cannot access the docker socket, require sudo.
@@ -83,33 +201,6 @@ fi
 
 docker compose version >/dev/null 2>&1 || { echo "[agent_stack_runtime][ERR] docker compose not available" >&2; exit 1; }
 
-compose_args=(-f docker-compose.yml)
-if [[ -f docker-compose.local.yml ]]; then
-  compose_args+=(-f docker-compose.local.yml)
-elif [[ -f _build_ctx/docker-compose.local.yml ]]; then
-  compose_args+=(-f _build_ctx/docker-compose.local.yml)
-fi
-
-fresh=0
-pull=1
-for a in "${@:-}"; do
-  case "$a" in
-    --fresh)
-      fresh=1
-      ;;
-    --no-pull)
-      pull=0
-      ;;
-  esac
-done
-
-if [[ "${AGENT_STACK_FRESH:-0}" == "1" ]]; then
-  fresh=1
-fi
-if [[ "${AGENT_STACK_NO_PULL:-0}" == "1" ]]; then
-  pull=0
-fi
-
 if [[ "$fresh" -eq 1 ]]; then
   echo "[agent_stack_runtime] fresh mode: docker compose down -v"
   docker compose "${compose_args[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -119,7 +210,11 @@ if [[ "$pull" -eq 1 ]]; then
   echo "[agent_stack_runtime] pulling images..."
   docker compose "${compose_args[@]}" pull
 else
-  echo "[agent_stack_runtime] skip pulling images (--no-pull)"
+  if [[ "$use_local" -eq 1 ]]; then
+    echo "[agent_stack_runtime] local mode: skipping image pull"
+  else
+    echo "[agent_stack_runtime] skip pulling images (--no-pull)"
+  fi
 fi
 
 docker compose "${compose_args[@]}" up -d

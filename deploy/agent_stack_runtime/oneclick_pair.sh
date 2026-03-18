@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./oneclick_pair.sh <sunshine_ip> [stream_id] [pin] [worker_name]
+#   ./oneclick_pair.sh <sunshine_ip> --stream-id N [--pin PIN] [--worker NAME] [--control-port PORT]
 #
 # Examples:
 #   ./oneclick_pair.sh 192.168.11.50
@@ -13,39 +14,148 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-sunshine_ip="${1:-}"
-arg2="${2:-}"
-arg3="${3:-}"
-arg4="${4:-}"
-
-stream_id="1"
+positional_args=()
+use_local=0
+stream_id=""
 pin=""
-worker="worker_s1"
+worker=""
+control_port=""
 explicit_stream_id=0
 explicit_worker=0
+explicit_pin=0
+explicit_control_port=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local)
+      use_local=1
+      shift
+      ;;
+    --stream-id)
+      if [[ $# -lt 2 ]]; then
+        echo "[pair][ERR] --stream-id 需要一个参数，例如 --stream-id 1" >&2
+        exit 2
+      fi
+      stream_id="${2:-}"
+      explicit_stream_id=1
+      shift 2
+      ;;
+    --stream-id=*)
+      stream_id="${1#*=}"
+      explicit_stream_id=1
+      shift
+      ;;
+    --pin)
+      if [[ $# -lt 2 ]]; then
+        echo "[pair][ERR] --pin 需要一个 4 位数字，例如 --pin 1234" >&2
+        exit 2
+      fi
+      pin="${2:-}"
+      explicit_pin=1
+      shift 2
+      ;;
+    --pin=*)
+      pin="${1#*=}"
+      explicit_pin=1
+      shift
+      ;;
+    --worker)
+      if [[ $# -lt 2 ]]; then
+        echo "[pair][ERR] --worker 需要一个名称，例如 --worker worker_s1" >&2
+        exit 2
+      fi
+      worker="${2:-}"
+      explicit_worker=1
+      shift 2
+      ;;
+    --worker=*)
+      worker="${1#*=}"
+      explicit_worker=1
+      shift
+      ;;
+    --control-port)
+      if [[ $# -lt 2 ]]; then
+        echo "[pair][ERR] --control-port 需要一个端口，例如 --control-port 50100" >&2
+        exit 2
+      fi
+      control_port="${2:-}"
+      explicit_control_port=1
+      shift 2
+      ;;
+    --control-port=*)
+      control_port="${1#*=}"
+      explicit_control_port=1
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        positional_args+=("$1")
+        shift
+      done
+      ;;
+    -h|--help)
+      echo "usage: $0 <sunshine_ip> [stream_id] [pin] [worker_name]" >&2
+      echo "   or: $0 <sunshine_ip> --stream-id N [--pin PIN] [--worker NAME] [--control-port PORT]" >&2
+      exit 0
+      ;;
+    *)
+      positional_args+=("$1")
+      shift
+      ;;
+  esac
+done
+if [[ "${AGENT_STACK_USE_LOCAL:-0}" == "1" ]]; then
+  use_local=1
+fi
 
-# Arg parsing with a convenience shorthand:
-# - If the 2nd arg is a 4-digit number, treat it as PIN (stream_id stays default 1).
+if [[ -n "$stream_id" ]]; then
+  explicit_stream_id=1
+fi
+if [[ -n "$worker" ]]; then
+  explicit_worker=1
+fi
+if [[ -n "$pin" ]]; then
+  explicit_pin=1
+fi
+if [[ -n "$control_port" ]]; then
+  explicit_control_port=1
+fi
+
+sunshine_ip="${positional_args[0]:-}"
+arg2="${positional_args[1]:-}"
+arg3="${positional_args[2]:-}"
+arg4="${positional_args[3]:-}"
+
+stream_id="${stream_id:-}"
+
+# Positional fallback with a convenience shorthand:
+# - If the 2nd arg is a 4-digit number, treat it as PIN (stream_id defaults to 1).
 # - Otherwise treat the 2nd arg as stream_id, and 3rd as optional PIN.
-if [[ -n "$arg2" && "$arg2" =~ ^[0-9]{4}$ && -z "$arg3" ]]; then
-  pin="$arg2"
-  stream_id="1"
-else
-  if [[ -n "$arg2" ]]; then
-    stream_id="$arg2"
-    explicit_stream_id=1
-  fi
-  if [[ -n "$arg3" ]]; then
-    pin="$arg3"
-  fi
-  if [[ -n "$arg4" ]]; then
-    worker="$arg4"
-    explicit_worker=1
+if [[ -z "$stream_id" ]]; then
+  if [[ -n "$arg2" && "$arg2" =~ ^[0-9]{4}$ && -z "$arg3" && -z "$pin" ]]; then
+    pin="$arg2"
+    stream_id="1"
+  else
+    if [[ -n "$arg2" ]]; then
+      stream_id="$arg2"
+      explicit_stream_id=1
+    fi
+    if [[ -n "$arg3" && -z "$pin" ]]; then
+      pin="$arg3"
+    fi
+    if [[ -n "$arg4" && -z "$worker" ]]; then
+      worker="$arg4"
+      explicit_worker=1
+    fi
   fi
 fi
 
+stream_id="${stream_id:-1}"
+worker="${worker:-worker_s${stream_id}}"
+
 if [[ -z "$sunshine_ip" ]]; then
   echo "usage: $0 <sunshine_ip> [stream_id] [pin] [worker_name]" >&2
+  echo "   or: $0 <sunshine_ip> --stream-id N [--pin PIN] [--worker NAME] [--control-port PORT]" >&2
   exit 2
 fi
 
@@ -65,10 +175,12 @@ dc() {
 }
 
 compose_args=(-f docker-compose.yml)
-if [[ -f docker-compose.local.yml ]]; then
-  compose_args+=(-f docker-compose.local.yml)
-elif [[ -f _build_ctx/docker-compose.local.yml ]]; then
-  compose_args+=(-f _build_ctx/docker-compose.local.yml)
+if [[ "$use_local" -eq 1 ]]; then
+  if [[ -f docker-compose.local.yml ]]; then
+    compose_args+=(-f docker-compose.local.yml)
+  elif [[ -f _build_ctx/docker-compose.local.yml ]]; then
+    compose_args+=(-f _build_ctx/docker-compose.local.yml)
+  fi
 fi
 
 if [[ -n "$pin" && ! "$pin" =~ ^[0-9]{4}$ ]]; then
@@ -81,8 +193,22 @@ if [[ ! "$stream_id" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-# Stable convention: stream 1 -> control 50001, stream 2 -> 50002, ...
-control_port=$((50000 + 10#${stream_id}))
+if (( 10#$stream_id < 1 || 10#$stream_id > 20 )); then
+  echo "[pair][ERR] stream_id 当前只支持 1..20（strem_agent_server 仍然有这个上限）" >&2
+  echo "[pair][ERR] 你可以改成 1..20 内的值，或者先把 strem_agent_server 的 MAX_STREAMS 提升后再用更大 stream_id" >&2
+  exit 2
+fi
+
+if [[ -n "$control_port" ]]; then
+  if [[ ! "$control_port" =~ ^[0-9]+$ ]]; then
+    echo "[pair][ERR] control_port 必须是数字，例如 50100" >&2
+    exit 2
+  fi
+  if (( 10#$control_port < 1 || 10#$control_port > 65535 )); then
+    echo "[pair][ERR] control_port 必须在 1..65535 之间" >&2
+    exit 2
+  fi
+fi
 
 # Enforce a stable convention:
 # - default worker name is derived from stream_id: worker_s<id>
@@ -105,7 +231,12 @@ else
   fi
 fi
 
-echo "[pair] worker=$worker stream_id=$stream_id sunshine_ip=$sunshine_ip pin=${pin:-'(auto)'}"
+# Stable convention: stream 1 -> control 50001, stream 2 -> 50002, ...
+if [[ -z "$control_port" ]]; then
+  control_port=$((50000 + 10#${stream_id}))
+fi
+
+echo "[pair] worker=$worker stream_id=$stream_id control_port=$control_port sunshine_ip=$sunshine_ip pin=${pin:-'(auto)'}"
 
 # Ensure ML_IMAGE exists in config and is loaded by the container.
 ml_image="$(grep -E '^ML_IMAGE=' config/agent_link_service.env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
@@ -131,15 +262,23 @@ dc docker exec -it agent_link_service bash -lc "/app/mlctl.sh add $worker $sunsh
 
 # Patch existing worker config:
 # - ensure IMAGE is correct
-# - enforce a stable stream/port convention so "fresh" reruns don't get stale values from volumes:
-#   worker_sN <-> STREAM_ID=N, TCP_PORT=19000, CONTROL_PORT=50000+N (so stream 1 -> 50001)
+# - keep worker_sN and stream_id aligned
+# - if CONTROL_PORT already exists, preserve it unless user explicitly passed --control-port
 dc docker exec -it agent_link_service bash -lc "f=/app/workers/$worker.conf; \
   if [[ -f \"\$f\" ]]; then \
     sed -i \"s#^STREAM_ID=.*#STREAM_ID=\\\"$stream_id\\\"#\" \"\$f\" 2>/dev/null || true; \
     sed -i \"s#^TCP_HOST=.*#TCP_HOST=\\\"127.0.0.1\\\"#\" \"\$f\" 2>/dev/null || true; \
     sed -i \"s#^TCP_PORT=.*#TCP_PORT=\\\"19000\\\"#\" \"\$f\" 2>/dev/null || true; \
     sed -i \"s#^CONTROL_BIND=.*#CONTROL_BIND=\\\"127.0.0.1\\\"#\" \"\$f\" 2>/dev/null || true; \
-    sed -i \"s#^CONTROL_PORT=.*#CONTROL_PORT=\\\"$control_port\\\"#\" \"\$f\" 2>/dev/null || true; \
+    if [[ \"$explicit_control_port\" -eq 1 ]]; then \
+      if grep -q '^CONTROL_PORT=' \"\$f\"; then \
+        sed -i \"s#^CONTROL_PORT=.*#CONTROL_PORT=\\\"$control_port\\\"#\" \"\$f\"; \
+      else \
+        printf '\\nCONTROL_PORT=\\\"%s\\\"\\n' \"$control_port\" >>\"\$f\"; \
+      fi; \
+    elif ! grep -q '^CONTROL_PORT=' \"\$f\"; then \
+      printf '\\nCONTROL_PORT=\\\"%s\\\"\\n' \"$control_port\" >>\"\$f\"; \
+    fi; \
     if grep -q '^IMAGE=' \"\$f\"; then \
       sed -i \"s#^IMAGE=\\\".*\\\"#IMAGE=\\\"$ml_image\\\"#\" \"\$f\"; \
     else \

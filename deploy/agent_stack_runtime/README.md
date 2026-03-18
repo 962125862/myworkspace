@@ -2,7 +2,7 @@
 
 这个目录是一个最小运行包：用户不需要 clone 全仓库源码。
 
-它会拉起两个服务（直接 pull GHCR 镜像）：
+默认会拉起两个服务（直接 pull GHCR 镜像）：
 
 - `ghcr.io/962125862/myworkspace/strem-agent-server:latest`
 - `ghcr.io/962125862/myworkspace/agent-link-service:latest`
@@ -35,14 +35,22 @@ docker compose logs -f --tail 200 agent_link_service
 sudo ./oneclick_up.sh
 ```
 
+如果你要跑本地 `agent-link-service:local` 覆盖版，显式加 `--local`，或者设置 `AGENT_STACK_USE_LOCAL=1`。
+
 4) 第一次需要配对（可选一键脚本）：
 
 ```bash
 # 自动 PIN（命令行会打印 PIN，你去 Sunshine 主机端输入）
+./oneclick_pair.sh <SUNSHINE_IP> --stream-id 1
+
+# 也可以继续用老的 positional 写法
 ./oneclick_pair.sh <SUNSHINE_IP> 1
 
 # 或指定 PIN=1234
-./oneclick_pair.sh <SUNSHINE_IP> 1 1234
+./oneclick_pair.sh <SUNSHINE_IP> --stream-id 1 --pin 1234
+
+# 如果你要手动指定 UDP control 端口
+./oneclick_pair.sh <SUNSHINE_IP> --stream-id 1 --control-port 50100
 ```
 
 停止：
@@ -77,7 +85,8 @@ docker exec -it agent_link_service bash -lc '/app/mlctl.sh pair worker_s1 1234'
 
 - `worker_sN.conf` 里配置 `STREAM_ID="N"`（文件名和 STREAM_ID 一致）
 - `TCP_PORT` 推荐固定为 `19000`（推流到 strem_agent_server ingest）
-- `CONTROL_PORT` 推荐为 `50000+STREAM_ID`（例如 stream 1 -> 50001）
+- `CONTROL_PORT` 推荐为 `50000+STREAM_ID`（例如 stream 1 -> 50001）；如果你在 `worker_sN.conf` 里手写了 `CONTROL_PORT`，`oneclick_pair.sh` 会优先沿用它
+- 目前 `strem_agent_server` 只接受 `stream_id=1..20`，更大的编号会在配对前直接报错；如果要扩展上限，需要先改 server 端协议限制
 
 ## 串流分辨率/帧率/码率怎么配？
 
@@ -137,6 +146,17 @@ docker exec -it agent_link_service bash -lc '/app/mlctl.sh restart worker_s1'
 
 ## 一键脚本参数
 
+- `./oneclick_up.sh --local`：改用本地 `docker-compose.local.yml` 覆盖
 - `./oneclick_up.sh --fresh`：等价于先 `docker compose down -v`，再启动（清空 workers/keys）
 - `./oneclick_up.sh --no-pull`：启动时不 `docker compose pull`（离线/不想拉镜像时用）
+- `./oneclick_up.sh --dry-run`：只打印本次启动计划，不真正 `pull/up`
+- `./oneclick_down.sh --local`：down 时同样使用本地覆盖文件
 - `./oneclick_down.sh -v`：down 时同时删除 volumes（清空 workers/keys）
+
+## 关于 GHCR 加速
+
+GHCR 没有 Docker Hub 那种统一的 `registry-mirrors` 机制可直接套用。
+如果你在网络较差的环境里需要加速，通常只有两种实用做法：
+
+- 用你自己的 registry proxy / mirror，把镜像重定向到那个仓库，再改 `image:` 前缀
+- 先在能联网的机器 `docker pull`，再 `docker save` / `docker load`
