@@ -71,6 +71,7 @@
 
 - 当前默认参数就是 `1024x768 / 30fps / hevc / 444 / full / skip-mode-check`
 - `mlctl.sh` 当前模板也与这里保持一致
+- 启动时会先探测 Sunshine 主机是否可达；如果探测不到，会在容器内等待 30 秒再重试，避免 `restart: unless-stopped` 形成快速重启循环
 
 ### 1.4 当前推荐启动参数
 

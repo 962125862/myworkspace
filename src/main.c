@@ -11,9 +11,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
 #include <string.h>
 #include <strings.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <time.h>
@@ -29,6 +32,8 @@
 extern const char* gs_error;
 
 static volatile int g_running = 1;
+
+#define HOST_OFFLINE_RETRY_SEC 30
 
 static const char* gs_rc_name(int rc) {
     switch (rc) {
@@ -288,6 +293,129 @@ static void generate_pair_pin(char out[5]) {
 
     unsigned int pin = (unsigned int)(rand() % 10000);
     snprintf(out, 5, "%04u", pin);
+}
+
+static int contains_case_insensitive(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*needle) {
+        return 0;
+    }
+
+    size_t needle_len = strlen(needle);
+    for (const char* h = haystack; *h; ++h) {
+        size_t i = 0;
+        while (h[i] && i < needle_len &&
+               tolower((unsigned char)h[i]) == tolower((unsigned char)needle[i])) {
+            ++i;
+        }
+        if (i == needle_len) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int gs_error_is_transient_connect_failure(const char* err) {
+    static const char* const needles[] = {
+        "connection refused",
+        "connect failed",
+        "failed to connect",
+        "could not connect",
+        "unable to connect",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "host is unreachable",
+        "no route to host",
+    };
+
+    if (!err || !*err) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); ++i) {
+        if (contains_case_insensitive(err, needles[i])) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int ping_host_once(const char* host) {
+    if (!host || !*host) {
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[ml_worker] ping probe unavailable: fork failed: %s\n", strerror(errno));
+        return 2;
+    }
+
+    if (pid == 0) {
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+        execlp("ping", "ping", "-n", "-q", "-c", "1", "-W", "1", host, (char*)NULL);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (1) {
+        pid_t wait_rc = waitpid(pid, &status, 0);
+        if (wait_rc == pid) {
+            break;
+        }
+        if (wait_rc < 0 && errno == EINTR) {
+            if (!g_running) {
+                return -1;
+            }
+            continue;
+        }
+        if (wait_rc < 0) {
+            fprintf(stderr, "[ml_worker] ping probe unavailable: waitpid failed: %s\n", strerror(errno));
+            return 2;
+        }
+    }
+
+    if (!WIFEXITED(status)) {
+        return 1;
+    }
+
+    int exit_code = WEXITSTATUS(status);
+    if (exit_code == 0) {
+        return 0;
+    }
+    if (exit_code == 127) {
+        return 2;
+    }
+
+    return 1;
+}
+
+static int wait_for_host_online(const char* host) {
+    while (g_running) {
+        int ping_rc = ping_host_once(host);
+        if (ping_rc == 0) {
+            return 0;
+        }
+        if (ping_rc < 0) {
+            return -1;
+        }
+        if (ping_rc > 1) {
+            fprintf(stderr, "[ml_worker] ping probe unavailable, trying direct connection\n");
+            return 0;
+        }
+
+        fprintf(stderr,
+                "[ml_worker] host %s is offline, sleeping %d seconds before retry\n",
+                host, HOST_OFFLINE_RETRY_SEC);
+        for (int i = 0; i < HOST_OFFLINE_RETRY_SEC && g_running; ++i) {
+            sleep(1);
+        }
+    }
+
+    return -1;
 }
 
 static int resolve_app_id(PSERVER_DATA server, const char* app_arg) {
@@ -748,10 +876,34 @@ static int run_stream_command(const StreamOptions* opt) {
             stream_chroma_name(effective.chroma),
             effective.bitdepth);
 
-    if (gs_init(&server, (char*)effective.host, 0, effective.key_dir, 1, effective.skip_mode_check) != 0) {
-        fprintf(stderr, "gs_init failed: %s\n", gs_error ? gs_error : "(null)");
-        return 2;
+    while (g_running) {
+        if (wait_for_host_online(effective.host) != 0) {
+            break;
+        }
+
+        if (gs_init(&server, (char*)effective.host, 0, effective.key_dir, 1, effective.skip_mode_check) != 0) {
+            const char* err = gs_error ? gs_error : "(null)";
+            if (gs_error_is_transient_connect_failure(err)) {
+                fprintf(stderr,
+                        "[ml_worker] gs_init failed because %s; sleeping %d seconds before retry\n",
+                        err, HOST_OFFLINE_RETRY_SEC);
+                for (int i = 0; i < HOST_OFFLINE_RETRY_SEC && g_running; ++i) {
+                    sleep(1);
+                }
+                continue;
+            }
+
+            fprintf(stderr, "gs_init failed: %s\n", err);
+            return 2;
+        }
+
+        break;
     }
+
+    if (!g_running) {
+        return 0;
+    }
+
     fprintf(stderr, "[ml_worker] gs_init: server.unsupported=%d (skip_mode_check=%d)\n",
             server.unsupported ? 1 : 0, effective.skip_mode_check ? 1 : 0);
 
