@@ -114,7 +114,8 @@
 - `--decode-backend <auto|intel|nvidia|cpu>`：默认后端偏好，默认 `auto`
   - `auto`：保留为真正的自动模式，按流元信息走 `stream_server` 路由表；当前主机默认优先 `Intel`
   - `intel/nvidia/cpu`：显式指定后端，直接跳过路由表
-- `--zmq-bridge-bind <addr>`：启用内置 ZMQ BGR bridge
+- `--zmq-bridge-bind <addr>`：启用内置 ZMQ BGR bridge；当前只要启用 bridge，就会默认再监听 `ipc:///tmp/stream_server_bgr.sock`
+- `--zmq-bridge-ipc-bind <addr>`：覆盖默认 IPC 地址
 - `--stress-test`：压测模式
 - `--stress-copies <n>`：压测副本数
 - `--h264-tap-port <p>`：开启 H264 tap
@@ -135,6 +136,11 @@
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
+
+默认同时监听：
+
+- `tcp://0.0.0.0:5566`
+- `ipc:///tmp/stream_server_bgr.sock`
 ```
 
 ### 2.2 启动环境变量

@@ -18,6 +18,7 @@
 #include "zmq_bridge.h"
 
 static volatile int g_running = 1;
+static const char* kDefaultZmqBridgeIpcBind = "ipc:///tmp/stream_server_bgr.sock";
 
 static int parse_int_env_clamped_local(const char* name, int default_value,
                                        int min_value, int max_value) {
@@ -58,6 +59,8 @@ static void print_usage(const char* prog) {
     printf("\nOptional feature flags (prefer CLI over env):\n");
     printf("  --decode-backend <auto|intel|nvidia|cpu>\n");
     printf("  --zmq-bridge-bind <addr>  Enable built-in ZMQ BGR bridge, e.g. tcp://0.0.0.0:5566\n");
+    printf("  --zmq-bridge-ipc-bind <addr>  Optional second ZMQ bridge endpoint (default with ZMQ bridge: %s)\n",
+           kDefaultZmqBridgeIpcBind);
     printf("  --stress-test         Enable stress test mode/report\n");
     printf("  --stress-copies <n>   Stress test copies\n");
     printf("\nH264 tap (AnnexB H264 TCP output):\n");
@@ -90,6 +93,7 @@ int main(int argc, char* argv[]) {
      */
     char decode_backend[32] = {0};
     char zmq_bridge_bind[256] = {0};
+    char zmq_bridge_ipc_bind[256] = {0};
     int stress_test = 0;
     int stress_copies = 0;
     int h264_tap_port = 0;
@@ -110,6 +114,7 @@ int main(int argc, char* argv[]) {
         {"verbose", no_argument, 0, 'v'},
         {"decode-backend", required_argument, 0, 1000},
         {"zmq-bridge-bind", required_argument, 0, 1003},
+        {"zmq-bridge-ipc-bind", required_argument, 0, 1014},
         {"stress-test", no_argument, 0, 1004},
         {"stress-copies", required_argument, 0, 1005},
         {"h264-tap-port", required_argument, 0, 1006},
@@ -165,6 +170,9 @@ int main(int argc, char* argv[]) {
                 break;
             case 1003: /* --zmq-bridge-bind */
                 strncpy(zmq_bridge_bind, optarg, sizeof(zmq_bridge_bind) - 1);
+                break;
+            case 1014: /* --zmq-bridge-ipc-bind */
+                strncpy(zmq_bridge_ipc_bind, optarg, sizeof(zmq_bridge_ipc_bind) - 1);
                 break;
             case 1004: /* --stress-test */
                 stress_test = 1;
@@ -222,6 +230,9 @@ int main(int argc, char* argv[]) {
     if (zmq_bridge_bind[0]) {
         setenv("ZMQ_BRIDGE_BIND", zmq_bridge_bind, 1);
     }
+    if (zmq_bridge_ipc_bind[0]) {
+        setenv("ZMQ_BRIDGE_IPC_BIND", zmq_bridge_ipc_bind, 1);
+    }
     if (stress_test) {
         setenv("STRESS_TEST", "1", 1);
     }
@@ -269,8 +280,16 @@ int main(int argc, char* argv[]) {
     /* 可选：启动内置 ZMQ bridge（ROUTER），用于对外提供 GET_LATEST_BGR。
      * 通过环境变量控制，避免改变默认行为。
      *   ZMQ_BRIDGE_BIND=tcp://0.0.0.0:5566
+     *   ZMQ_BRIDGE_IPC_BIND=ipc:///tmp/stream_server_bgr.sock
+     * 未显式配置 IPC bind 时，只要启用了 ZMQ bridge，就默认增加一个 IPC 监听。
      */
     const char* zmq_bind_env = getenv("ZMQ_BRIDGE_BIND");
+    const char* zmq_ipc_bind_env = getenv("ZMQ_BRIDGE_IPC_BIND");
+    if ((!zmq_ipc_bind_env || !zmq_ipc_bind_env[0]) &&
+        ((zmq_bridge_bind[0] != '\0') || (zmq_bind_env && zmq_bind_env[0]))) {
+        setenv("ZMQ_BRIDGE_IPC_BIND", kDefaultZmqBridgeIpcBind, 1);
+        zmq_ipc_bind_env = getenv("ZMQ_BRIDGE_IPC_BIND");
+    }
     
     /* 守护进程模式 */
     if (daemon_mode) {
@@ -287,9 +306,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (zmq_bind_env && zmq_bind_env[0]) {
-        if (zmq_bridge_start(&stream_mgr, zmq_bind_env, &g_running) == 0) {
-            printf("[Main] ZMQ bridge enabled: %s\n", zmq_bind_env);
+    if ((zmq_bind_env && zmq_bind_env[0]) || (zmq_ipc_bind_env && zmq_ipc_bind_env[0])) {
+        if (zmq_bridge_start(&stream_mgr, zmq_bind_env, zmq_ipc_bind_env, &g_running) == 0) {
+            if (zmq_bind_env && zmq_bind_env[0] &&
+                zmq_ipc_bind_env && zmq_ipc_bind_env[0]) {
+                printf("[Main] ZMQ bridge enabled: tcp=%s ipc=%s\n",
+                       zmq_bind_env, zmq_ipc_bind_env);
+            } else if (zmq_bind_env && zmq_bind_env[0]) {
+                printf("[Main] ZMQ bridge enabled: %s\n", zmq_bind_env);
+            } else {
+                printf("[Main] ZMQ bridge enabled: %s\n", zmq_ipc_bind_env);
+            }
         } else {
             fprintf(stderr, "[Main] Failed to start ZMQ bridge (maybe not built with libzmq)\n");
         }
@@ -339,6 +366,8 @@ int main(int argc, char* argv[]) {
     }
     
     printf("[Main] Server stopped\n");
+
+    zmq_bridge_shutdown();
 
     /* 销毁流管理器，释放所有 mutex 和解码器资源 */
     stream_manager_destroy(&stream_mgr);

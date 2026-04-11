@@ -15,6 +15,7 @@
  *     {"stream_id": 1, "timeout_ms": 1000, "request_new": true}
  *   说明：收到请求时，会从对应流的 last_frame 按需生成 BGR24 并返回。
  *        如果 last_frame 还是硬件帧，则先下载到 CPU，再走统一像素格式适配层。
+ *        对同一帧的重复请求，bridge 内部会复用最近一次生成的 BGR24 结果。
  *
  *   Reply multipart (client 看到):
  *     [status][meta_json][bgr24]
@@ -35,16 +36,18 @@ extern "C" {
  * @brief 启动内置 ZMQ bridge（后台线程）。
  *
  * @param mgr          StreamManager
- * @param bind_addr    ZMQ bind 地址（如 "tcp://0.0.0.0:5566"）
+ * @param bind_addr    主 ZMQ bind 地址（如 "tcp://0.0.0.0:5566"），可为 NULL/空串
+ * @param ipc_bind_addr 可选第二个 ZMQ bind 地址（通常为 "ipc:///tmp/stream_server_bgr.sock"），可为 NULL/空串
  * @param running_flag 指向主进程运行标志（为 0 时线程退出）；可为 NULL（则永不退出）
  *
  * @return 0 成功启动；-1 不支持/失败（例如未编译 libzmq 支持）
  */
-int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* running_flag);
+int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, const char* ipc_bind_addr,
+                     volatile int* running_flag);
 
 /**
  * @brief 保留的 no-op 钩子。
- * @note  当前实现改为“请求时从 last_frame 按需生成 BGR24”，不再缓存帧。
+ * @note  当前实现改为“请求时从 last_frame 按需生成 BGR24”，不在该钩子里缓存帧。
  */
 void zmq_bridge_on_new_frame(uint16_t stream_id, const DecodedFrame* frame);
 

@@ -130,11 +130,14 @@ color_range
 
 内置 ZMQ bridge 使用：
 
-- bind：`tcp://0.0.0.0:5566`
+- tcp bind：`tcp://0.0.0.0:5566`
+- ipc bind：`ipc:///tmp/stream_server_bgr.sock`
+- 默认行为：只要启用了 `--zmq-bridge-bind`，就会自动同时启用上面的 IPC 地址；只有想改路径时才需要额外传 `--zmq-bridge-ipc-bind`
 - 命令：`GET_LATEST_BGR`
 - 行为：请求时从对应流的 `last_frame` 生成一帧 `BGR24`
   - `last_frame` 是硬件帧时，先 `av_hwframe_transfer_data()` 下载到 CPU
   - 然后统一调用 `decoder_convert_format_with_info(..., DECODE_FMT_BGR24)`
+  - 对同一帧的重复请求，bridge 内部会复用最近一次生成的 `BGR24` 结果
   - 已知快路径：
     - `NV12 -> BGR24` 走 `libyuv`
     - `YUV420P -> BGR24` 走 `libyuv`

@@ -10,10 +10,12 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifdef HAVE_ZMQ
 
@@ -25,6 +27,7 @@
 #define STREAM_COLOR_RANGE_FULL 1u
 
 typedef struct {
+    atomic_uint refcount;
     uint16_t stream_id;
     int width;
     int height;
@@ -34,20 +37,34 @@ typedef struct {
     uint64_t mono_ns;
     uint32_t color_space;
     uint32_t color_range;
+    DecodeFormat source_format;
     uint8_t* bgr;
     size_t bgr_sz;
 } ZmqBgrFrame;
 
 typedef struct {
+    ZmqBgrFrame* frame;
+} ZmqBgrCacheEntry;
+
+typedef struct {
     StreamManager* mgr;
-    char bind_addr[128];
+    char bind_addr[256];
+    char ipc_bind_addr[256];
     volatile int* running;
+    void* zmq_ctx;
+    ZmqBgrCacheEntry* cache_entries;
+    size_t cache_count;
 
     pthread_mutex_t start_mu;
     pthread_cond_t start_cv;
     int start_done;
     int start_ok;
 } ZmqBridgeArg;
+
+static pthread_mutex_t g_zmq_bridge_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_zmq_bridge_thread;
+static ZmqBridgeArg* g_zmq_bridge_arg = NULL;
+static int g_zmq_bridge_started = 0;
 
 static const char* color_space_name(uint32_t color_space) {
     switch (color_space) {
@@ -71,6 +88,44 @@ static uint64_t monotonic_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+static int has_bind_addr(const char* addr) {
+    return addr && addr[0] != '\0';
+}
+
+static const char* ipc_path_from_bind_addr(const char* addr) {
+    if (!has_bind_addr(addr) || strncmp(addr, "ipc://", 6) != 0) {
+        return NULL;
+    }
+    return addr + 6;
+}
+
+static void cleanup_ipc_bind_addr(const char* addr) {
+    const char* path = ipc_path_from_bind_addr(addr);
+    if (!path || !*path) {
+        return;
+    }
+    if (unlink(path) != 0 && errno != ENOENT) {
+        fprintf(stderr, "[ZMQ] ipc cleanup failed: %s (%s)\n", path, strerror(errno));
+    }
+}
+
+static int bind_router_endpoint(void* router, const char* addr) {
+    if (!has_bind_addr(addr)) {
+        return 0;
+    }
+
+    cleanup_ipc_bind_addr(addr);
+    if (zmq_bind(router, addr) == 0) {
+        return 0;
+    }
+
+    fprintf(stderr, "[ZMQ] bind failed: %s (%s)\n", addr, zmq_strerror(errno));
+    cleanup_ipc_bind_addr(addr);
+    return -1;
+}
+
+static void free_bgr_frame(ZmqBgrFrame* f);
+
 static int send_frame(void* sock, const void* data, size_t len, int more) {
     zmq_msg_t msg;
     zmq_msg_init_size(&msg, len);
@@ -79,6 +134,28 @@ static int send_frame(void* sock, const void* data, size_t len, int more) {
     }
     int flags = more ? ZMQ_SNDMORE : 0;
     int rc = zmq_msg_send(&msg, sock, flags);
+    zmq_msg_close(&msg);
+    return (rc >= 0) ? 0 : -1;
+}
+
+static void free_bgr_frame_msg(void* data, void* hint) {
+    (void)data;
+    free_bgr_frame((ZmqBgrFrame*)hint);
+}
+
+static int send_bgr_frame_owned(void* sock, ZmqBgrFrame* frame) {
+    if (!sock || !frame || !frame->bgr) {
+        return -1;
+    }
+
+    zmq_msg_t msg;
+    if (zmq_msg_init_data(&msg, frame->bgr, frame->bgr_sz,
+                          free_bgr_frame_msg, frame) != 0) {
+        free_bgr_frame(frame);
+        return -1;
+    }
+
+    const int rc = zmq_msg_send(&msg, sock, 0);
     zmq_msg_close(&msg);
     return (rc >= 0) ? 0 : -1;
 }
@@ -158,11 +235,53 @@ static int parse_timeout_ms_from_json(const char* json, size_t len, int default_
 
 static void free_bgr_frame(ZmqBgrFrame* f) {
     if (!f) return;
+    if (atomic_fetch_sub_explicit(&f->refcount, 1u, memory_order_acq_rel) != 1u) {
+        return;
+    }
     free(f->bgr);
     free(f);
 }
 
-static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
+static void retain_bgr_frame(ZmqBgrFrame* f) {
+    if (!f) return;
+    atomic_fetch_add_explicit(&f->refcount, 1u, memory_order_relaxed);
+}
+
+static int cached_bgr_frame_matches(const ZmqBgrFrame* frame, uint16_t stream_id,
+                                    const DecodedFrame* snapshot,
+                                    const StreamInfo* info) {
+    if (!frame || !snapshot || !info) {
+        return 0;
+    }
+
+    return frame->stream_id == stream_id &&
+           frame->width == snapshot->width &&
+           frame->height == snapshot->height &&
+           frame->pts == snapshot->pts &&
+           frame->key_frame == (snapshot->key_frame ? 1 : 0) &&
+           frame->color_space == info->color_space &&
+           frame->color_range == info->color_range &&
+           frame->source_format == snapshot->format;
+}
+
+static void clear_cached_bgr_frames(ZmqBridgeArg* arg) {
+    if (!arg || !arg->cache_entries) {
+        return;
+    }
+
+    for (size_t i = 0; i < arg->cache_count; i++) {
+        if (arg->cache_entries[i].frame) {
+            free_bgr_frame(arg->cache_entries[i].frame);
+            arg->cache_entries[i].frame = NULL;
+        }
+    }
+
+    free(arg->cache_entries);
+    arg->cache_entries = NULL;
+    arg->cache_count = 0;
+}
+
+static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, ZmqBgrFrame** out) {
     if (!stream || !out) return -1;
 
     *out = NULL;
@@ -189,6 +308,16 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
         return -1;
     }
 
+    if (arg && stream_id < arg->cache_count) {
+        ZmqBgrFrame* cached = arg->cache_entries[stream_id].frame;
+        if (cached_bgr_frame_matches(cached, stream_id, snapshot, &info_snapshot)) {
+            retain_bgr_frame(cached);
+            decoder_free_frame(snapshot);
+            *out = cached;
+            return 0;
+        }
+    }
+
     if (decoder_convert_format_with_info(NULL, snapshot, &info_snapshot,
                                          &converted, DECODE_FMT_BGR24) != 0) {
         decoder_free_frame(snapshot);
@@ -211,12 +340,23 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
     frame->mono_ns = monotonic_ns();
     frame->color_space = info_snapshot.color_space;
     frame->color_range = info_snapshot.color_range;
+    frame->source_format = snapshot->format;
     frame->bgr_sz = (size_t)converted.linesize[0] * (size_t)converted.height;
     frame->bgr = converted.data[0];
+    atomic_init(&frame->refcount, 1u);
     converted.data[0] = NULL;
     if (!frame->bgr) {
         free(frame);
         return -1;
+    }
+
+    if (arg && stream_id < arg->cache_count) {
+        ZmqBgrFrame* old = arg->cache_entries[stream_id].frame;
+        arg->cache_entries[stream_id].frame = frame;
+        retain_bgr_frame(frame);
+        if (old) {
+            free_bgr_frame(old);
+        }
     }
 
     static int color_log_count = 0;
@@ -243,6 +383,7 @@ static void* zmq_bridge_thread(void* p) {
         pthread_mutex_unlock(&arg->start_mu);
         return NULL;
     }
+    arg->zmq_ctx = ctx;
 
     void* router = zmq_socket(ctx, ZMQ_ROUTER);
     if (!router) {
@@ -260,10 +401,12 @@ static void* zmq_bridge_thread(void* p) {
     zmq_setsockopt(router, ZMQ_SNDHWM, &sndhwm, sizeof(sndhwm));
     zmq_setsockopt(router, ZMQ_RCVHWM, &rcvhwm, sizeof(rcvhwm));
 
-    if (zmq_bind(router, arg->bind_addr) != 0) {
-        fprintf(stderr, "[ZMQ] bind failed: %s (%s)\n", arg->bind_addr, zmq_strerror(errno));
+    if (bind_router_endpoint(router, arg->bind_addr) != 0 ||
+        bind_router_endpoint(router, arg->ipc_bind_addr) != 0) {
         zmq_close(router);
         zmq_ctx_term(ctx);
+        cleanup_ipc_bind_addr(arg->bind_addr);
+        cleanup_ipc_bind_addr(arg->ipc_bind_addr);
         pthread_mutex_lock(&arg->start_mu);
         arg->start_ok = 0;
         arg->start_done = 1;
@@ -278,7 +421,17 @@ static void* zmq_bridge_thread(void* p) {
     pthread_cond_signal(&arg->start_cv);
     pthread_mutex_unlock(&arg->start_mu);
 
-    fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24\n", arg->bind_addr);
+    if (has_bind_addr(arg->bind_addr) && has_bind_addr(arg->ipc_bind_addr)) {
+        fprintf(stdout,
+                "[ZMQ] bridge enabled (ROUTER) tcp=%s ipc=%s, output=bgr24\n",
+                arg->bind_addr, arg->ipc_bind_addr);
+    } else if (has_bind_addr(arg->bind_addr)) {
+        fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24\n",
+                arg->bind_addr);
+    } else {
+        fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24\n",
+                arg->ipc_bind_addr);
+    }
 
     while (!arg->running || *arg->running) {
         zmq_msg_t f0;
@@ -348,13 +501,13 @@ static void* zmq_bridge_thread(void* p) {
                 (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
             } else {
                 ZmqBgrFrame* frame = NULL;
-                if (convert_last_frame_to_bgr(stream, &frame) != 0 && timeout_ms != 0) {
+                if (convert_last_frame_to_bgr(stream, arg, &frame) != 0 && timeout_ms != 0) {
                     const uint64_t deadline =
                         monotonic_ns() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000000ull;
                     while (timeout_ms < 0 || monotonic_ns() < deadline) {
                         struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
                         nanosleep(&ts, NULL);
-                        if (convert_last_frame_to_bgr(stream, &frame) == 0) {
+                        if (convert_last_frame_to_bgr(stream, arg, &frame) == 0) {
                             break;
                         }
                     }
@@ -379,8 +532,7 @@ static void* zmq_bridge_thread(void* p) {
 
                     (void)send_frame(router, "OK", 2, 1);
                     (void)send_frame(router, meta, (size_t)meta_n, 1);
-                    (void)send_frame(router, frame->bgr, frame->bgr_sz, 0);
-                    free_bgr_frame(frame);
+                    (void)send_bgr_frame_owned(router, frame);
                 }
             }
         } else {
@@ -395,18 +547,41 @@ static void* zmq_bridge_thread(void* p) {
 
     zmq_close(router);
     zmq_ctx_term(ctx);
+    cleanup_ipc_bind_addr(arg->bind_addr);
+    cleanup_ipc_bind_addr(arg->ipc_bind_addr);
+    clear_cached_bgr_frames(arg);
     free(arg);
     return NULL;
 }
 
-int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* running_flag) {
-    if (!mgr || !bind_addr) return -1;
+int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, const char* ipc_bind_addr,
+                     volatile int* running_flag) {
+    if (!mgr || (!has_bind_addr(bind_addr) && !has_bind_addr(ipc_bind_addr))) return -1;
+
+    pthread_mutex_lock(&g_zmq_bridge_mu);
+    if (g_zmq_bridge_started) {
+        pthread_mutex_unlock(&g_zmq_bridge_mu);
+        fprintf(stderr, "[ZMQ] bridge already started\n");
+        return -1;
+    }
+    pthread_mutex_unlock(&g_zmq_bridge_mu);
 
     ZmqBridgeArg* arg = (ZmqBridgeArg*)calloc(1, sizeof(*arg));
     if (!arg) return -1;
     arg->mgr = mgr;
     arg->running = running_flag;
-    strncpy(arg->bind_addr, bind_addr, sizeof(arg->bind_addr) - 1);
+    if (has_bind_addr(bind_addr)) {
+        strncpy(arg->bind_addr, bind_addr, sizeof(arg->bind_addr) - 1);
+    }
+    if (has_bind_addr(ipc_bind_addr)) {
+        strncpy(arg->ipc_bind_addr, ipc_bind_addr, sizeof(arg->ipc_bind_addr) - 1);
+    }
+    arg->cache_count = (size_t)mgr->max_streams + 1u;
+    arg->cache_entries = (ZmqBgrCacheEntry*)calloc(arg->cache_count, sizeof(*arg->cache_entries));
+    if (!arg->cache_entries) {
+        free(arg);
+        return -1;
+    }
 
     pthread_mutex_init(&arg->start_mu, NULL);
     pthread_cond_init(&arg->start_cv, NULL);
@@ -415,6 +590,7 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
     if (pthread_create(&th, NULL, zmq_bridge_thread, arg) != 0) {
         pthread_cond_destroy(&arg->start_cv);
         pthread_mutex_destroy(&arg->start_mu);
+        clear_cached_bgr_frames(arg);
         free(arg);
         return -1;
     }
@@ -431,11 +607,17 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
 
     if (!ok) {
         pthread_join(th, NULL);
+        clear_cached_bgr_frames(arg);
         free(arg);
         return -1;
     }
 
-    pthread_detach(th);
+    pthread_mutex_lock(&g_zmq_bridge_mu);
+    g_zmq_bridge_thread = th;
+    g_zmq_bridge_arg = arg;
+    g_zmq_bridge_started = 1;
+    pthread_mutex_unlock(&g_zmq_bridge_mu);
+
     return 0;
 }
 
@@ -445,13 +627,38 @@ void zmq_bridge_on_new_frame(uint16_t stream_id, const DecodedFrame* frame) {
 }
 
 void zmq_bridge_shutdown(void) {
+    ZmqBridgeArg* arg = NULL;
+    pthread_t th;
+    int started = 0;
+
+    pthread_mutex_lock(&g_zmq_bridge_mu);
+    if (g_zmq_bridge_started) {
+        arg = g_zmq_bridge_arg;
+        th = g_zmq_bridge_thread;
+        g_zmq_bridge_arg = NULL;
+        g_zmq_bridge_started = 0;
+        started = 1;
+    }
+    pthread_mutex_unlock(&g_zmq_bridge_mu);
+
+    if (!started || !arg) {
+        return;
+    }
+
+    if (arg->zmq_ctx) {
+        zmq_ctx_shutdown(arg->zmq_ctx);
+    }
+
+    pthread_join(th, NULL);
 }
 
 #else
 
-int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* running_flag) {
+int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, const char* ipc_bind_addr,
+                     volatile int* running_flag) {
     (void)mgr;
     (void)bind_addr;
+    (void)ipc_bind_addr;
     (void)running_flag;
     fprintf(stderr, "[ZMQ] bridge not built (need libzmq)\n");
     return -1;

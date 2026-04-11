@@ -105,6 +105,11 @@ cd /home/gejun/work/my_ml_work/stream_server
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
+
+默认同时监听：
+
+- `tcp://0.0.0.0:5566`
+- `ipc:///tmp/stream_server_bgr.sock`
 ```
 
 当前这条启动命令默认已经启用新逻辑，不需要额外加 CLI：
