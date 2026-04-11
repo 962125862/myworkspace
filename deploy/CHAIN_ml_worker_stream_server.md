@@ -88,14 +88,16 @@ color_range
 - 根据 `STREAM_START` 里的元信息选择解码后端
 - 解码后只保留每路 `last_frame`
 - 默认优先保留硬件帧引用，不在每帧 decode 后立刻下载
-- 在收到 ZMQ 请求时，如果 `last_frame` 还在 GPU 上，则先按需下载到 CPU，再转成 `BGR24`
+- 在收到 ZMQ 请求时，如果 `last_frame` 还在 GPU 上，则先按需下载到 CPU，再通过统一像素格式适配层转成 `BGR24`
 
 ## 5. 解码路由与回退顺序
 
 当前固定策略：
 
-- `HEVC 4:4:4 -> NVIDIA`
-- 其他全部先走 `Intel`
+- `auto` 模式按流元信息走路由表
+- 当前主机上 `HEVC 4:4:4 -> Intel`
+- 其他流当前也优先 `Intel`
+- 如果显式指定 `intel/nvidia/cpu`，则直接跳过路由表
 
 当前回退顺序：
 
@@ -104,8 +106,8 @@ color_range
 
 也就是：
 
-- `HEVC444` 优先 `NVIDIA`
-- 其他流优先 `Intel`
+- `HEVC444` 现在优先 `Intel`
+- 其他流同样优先 `Intel`
 - 如果 `Intel` 初始化失败，自动改试 `NVIDIA`
 - 如果还不行，再退到 `CPU`
 
@@ -131,8 +133,14 @@ color_range
 - bind：`tcp://0.0.0.0:5566`
 - 命令：`GET_LATEST_BGR`
 - 行为：请求时从对应流的 `last_frame` 生成一帧 `BGR24`
-  - `last_frame` 是 CPU 帧时，直接做 libyuv 转换
-  - `last_frame` 是硬件帧时，先 `av_hwframe_transfer_data()` 下载，再做 libyuv 转换
+  - `last_frame` 是硬件帧时，先 `av_hwframe_transfer_data()` 下载到 CPU
+  - 然后统一调用 `decoder_convert_format_with_info(..., DECODE_FMT_BGR24)`
+  - 已知快路径：
+    - `NV12 -> BGR24` 走 `libyuv`
+    - `YUV420P -> BGR24` 走 `libyuv`
+    - `YUV444P -> BGR24` 走 `libyuv`
+  - 兜底路径：
+    - `VUYX -> BGR24` 以及其它当前支持但没有专门快路径的格式，回退到 `FFmpeg swscale`
 
 返回 multipart：
 
@@ -163,10 +171,11 @@ color_range
 当前颜色转换策略：
 
 - 不再猜测固定矩阵
-- 按 `STREAM_START` 里传下来的
+- 优先使用 `STREAM_START` 里的
   - `color_space`
   - `color_range`
-  选择 libyuv 矩阵
+- `libyuv` 快路径使用上述颜色信息选择矩阵
+- `swscale` 兜底路径也会用同样的颜色信息设置 colorspace/range
 - 对外统一输出 `BGR24`
 
 ## 9. 与启动参数相关的新默认值
@@ -196,5 +205,5 @@ color_range
 - Sunshine 编码：`HEVC 4:4:4`
 - 分辨率：`1024x768`
 - 色彩：`BT.709 + full`
-- 解码：`NVIDIA`
+- 解码：`Intel VA-API`
 - 输出：ZMQ `BGR24`

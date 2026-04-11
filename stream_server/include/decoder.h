@@ -35,7 +35,7 @@ extern "C" {
 
 /** 解码后端类型 */
 typedef enum {
-    DECODE_BACKEND_AUTO = 0,       /* 自动检测: 优先 NVIDIA > VA-API > CPU */
+    DECODE_BACKEND_AUTO = 0,       /* 自动检测: 优先 Intel VA-API > NVIDIA > CPU */
     DECODE_BACKEND_INTEL_VA,       /* Intel VA-API (集显硬解) */
     DECODE_BACKEND_NVIDIA,         /* NVIDIA NVDEC (独显硬解) */
     DECODE_BACKEND_CPU             /* FFmpeg CPU 软解 */
@@ -47,6 +47,8 @@ typedef enum {
     DECODE_FMT_NV12,               /* YUV420 semi-planar (硬解默认输出) */
     DECODE_FMT_YUV420P,            /* YUV420 planar (软解默认输出) */
     DECODE_FMT_YUV444P,            /* YUV444 planar */
+    DECODE_FMT_VUYX,               /* packed VUYX 4:4:4 (Intel VA-API hwdownload on some hosts) */
+    DECODE_FMT_BGR24,              /* BGR 24bit (当前 ZMQ bridge 输出) */
     DECODE_FMT_BGRA,               /* BGRA 32bit */
     DECODE_FMT_RGB24               /* RGB 24bit */
 } DecodeFormat;
@@ -106,7 +108,7 @@ typedef struct DecoderCtx DecoderCtx;
 
 /**
  * @brief 自动检测可用的硬件解码后端
- * @return 推荐的后端类型 (NVIDIA > VA-API > CPU)
+ * @return 推荐的后端类型 (Intel VA-API > NVIDIA > CPU)
  *
  * 通过尝试创建 CUDA/VA-API 设备上下文来检测。
  * 创建成功则表示该后端可用，随即释放检测用的上下文。
@@ -175,11 +177,19 @@ DecodedFrame* decoder_ref_frame(const DecodedFrame* frame);
 int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame);
 
 /**
- * @brief 像素格式转换 (当前支持 NV12/YUV420P/YUV444P -> BGRA)
- * @note  使用 FFmpeg swscale，适合低频率或工具型调用
+ * @brief 像素格式转换 (支持 NV12/YUV420P/YUV444P/VUYX -> BGR24/BGRA/RGB24)
+ * @note  内部会优先使用已知的快速路径；无法匹配时回退到 FFmpeg swscale
  */
 int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
                            DecodedFrame* dst, DecodeFormat target_format);
+
+/**
+ * @brief 带流颜色信息的像素格式转换
+ * @note  对 BGR24 转换会优先使用 StreamInfo 中的 colorspace/range；适合对外输出链路
+ */
+int decoder_convert_format_with_info(DecoderCtx* ctx, const DecodedFrame* src,
+                                     const StreamInfo* info,
+                                     DecodedFrame* dst, DecodeFormat target_format);
 
 /* ==================== 统计信息 ==================== */
 

@@ -15,10 +15,9 @@
 #include <string.h>
 #include <time.h>
 
-#if defined(HAVE_ZMQ) && defined(HAVE_LIBYUV)
+#ifdef HAVE_ZMQ
 
 #include <zmq.h>
-#include <libyuv/convert_argb.h>
 
 #define STREAM_COLORSPACE_REC_601 0u
 #define STREAM_COLORSPACE_REC_709 1u
@@ -49,21 +48,6 @@ typedef struct {
     int start_done;
     int start_ok;
 } ZmqBridgeArg;
-
-static const struct YuvConstants* bgr_yuv_constants_from_info(const StreamInfo* info) {
-    uint32_t color_space = info ? info->color_space : STREAM_COLORSPACE_REC_709;
-    uint32_t color_range = info ? info->color_range : STREAM_COLOR_RANGE_LIMITED;
-
-    if (color_space == STREAM_COLORSPACE_REC_601) {
-        return (color_range == STREAM_COLOR_RANGE_FULL)
-             ? &kYvuJPEGConstants
-             : &kYvuI601Constants;
-    }
-
-    return (color_range == STREAM_COLOR_RANGE_FULL)
-         ? &kYvuF709Constants
-         : &kYvuH709Constants;
-}
 
 static const char* color_space_name(uint32_t color_space) {
     switch (color_space) {
@@ -184,6 +168,7 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
     *out = NULL;
 
     DecodedFrame* snapshot = NULL;
+    DecodedFrame converted = {0};
     StreamInfo info_snapshot;
     uint16_t stream_id = 0;
 
@@ -204,98 +189,42 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBgrFrame** out) {
         return -1;
     }
 
-    DecodedFrame* cpu_frame = snapshot;
-    if (snapshot->storage == DECODE_STORAGE_HW) {
-        if (decoder_materialize_frame(snapshot, &cpu_frame) != 0) {
-            decoder_free_frame(snapshot);
-            return -1;
-        }
+    if (decoder_convert_format_with_info(NULL, snapshot, &info_snapshot,
+                                         &converted, DECODE_FMT_BGR24) != 0) {
+        decoder_free_frame(snapshot);
+        return -1;
     }
+    decoder_free_frame(snapshot);
 
     ZmqBgrFrame* frame = (ZmqBgrFrame*)calloc(1, sizeof(*frame));
     if (!frame) {
-        if (cpu_frame != snapshot) {
-            decoder_free_frame(cpu_frame);
-        }
-        decoder_free_frame(snapshot);
+        free(converted.data[0]);
         return -1;
     }
 
     frame->stream_id = stream_id;
-    frame->width = cpu_frame->width;
-    frame->height = cpu_frame->height;
-    frame->stride = cpu_frame->width * 3;
-    frame->pts = cpu_frame->pts;
-    frame->key_frame = cpu_frame->key_frame ? 1 : 0;
+    frame->width = converted.width;
+    frame->height = converted.height;
+    frame->stride = converted.linesize[0];
+    frame->pts = converted.pts;
+    frame->key_frame = converted.key_frame ? 1 : 0;
     frame->mono_ns = monotonic_ns();
     frame->color_space = info_snapshot.color_space;
     frame->color_range = info_snapshot.color_range;
-    frame->bgr_sz = (size_t)frame->stride * (size_t)frame->height;
-    frame->bgr = (uint8_t*)malloc(frame->bgr_sz);
+    frame->bgr_sz = (size_t)converted.linesize[0] * (size_t)converted.height;
+    frame->bgr = converted.data[0];
+    converted.data[0] = NULL;
     if (!frame->bgr) {
-        if (cpu_frame != snapshot) {
-            decoder_free_frame(cpu_frame);
-        }
-        decoder_free_frame(snapshot);
         free(frame);
-        return -1;
-    }
-
-    const struct YuvConstants* yuv_constants = bgr_yuv_constants_from_info(&info_snapshot);
-    const int cpu_format = cpu_frame->format;
-    int ret = -1;
-    switch (cpu_frame->format) {
-        case DECODE_FMT_NV12:
-            ret = NV12ToRGB24Matrix(
-                cpu_frame->data[0], cpu_frame->linesize[0],
-                cpu_frame->data[1], cpu_frame->linesize[1],
-                frame->bgr, frame->stride,
-                yuv_constants,
-                frame->width, frame->height);
-            break;
-
-        case DECODE_FMT_YUV420P:
-            ret = I420ToRGB24Matrix(
-                cpu_frame->data[0], cpu_frame->linesize[0],
-                cpu_frame->data[1], cpu_frame->linesize[1],
-                cpu_frame->data[2], cpu_frame->linesize[2],
-                frame->bgr, frame->stride,
-                yuv_constants,
-                frame->width, frame->height);
-            break;
-
-        case DECODE_FMT_YUV444P:
-            ret = I444ToRGB24Matrix(
-                cpu_frame->data[0], cpu_frame->linesize[0],
-                cpu_frame->data[1], cpu_frame->linesize[1],
-                cpu_frame->data[2], cpu_frame->linesize[2],
-                frame->bgr, frame->stride,
-                yuv_constants,
-                frame->width, frame->height);
-            break;
-
-        default:
-            ret = -1;
-            break;
-    }
-
-    if (cpu_frame != snapshot) {
-        decoder_free_frame(cpu_frame);
-    }
-    decoder_free_frame(snapshot);
-
-    if (ret != 0) {
-        free_bgr_frame(frame);
         return -1;
     }
 
     static int color_log_count = 0;
     if (color_log_count++ < 4) {
-        printf("[ZMQ] stream %u BGR conversion using %s/%s (fmt=%d)\n",
+        printf("[ZMQ] stream %u BGR conversion using %s/%s via unified decoder path\n",
                stream_id,
                color_space_name(info_snapshot.color_space),
-               color_range_name(info_snapshot.color_range),
-               cpu_format);
+               color_range_name(info_snapshot.color_range));
     }
 
     *out = frame;
@@ -524,7 +453,7 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, volatile int* ru
     (void)mgr;
     (void)bind_addr;
     (void)running_flag;
-    fprintf(stderr, "[ZMQ] bridge not built (need libzmq + libyuv)\n");
+    fprintf(stderr, "[ZMQ] bridge not built (need libzmq)\n");
     return -1;
 }
 

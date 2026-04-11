@@ -343,7 +343,11 @@ static void maybe_start_h264_tap(void) {
 /* 获取解码后端（支持环境变量强制指定） */
 static DecodeBackend get_decode_backend(void) {
     const char* backend_env = getenv("DECODE_BACKEND");
-    if (backend_env) {
+    if (backend_env && *backend_env) {
+        if (strcasecmp(backend_env, "auto") == 0) {
+            printf("[Server] Using automatic decode routing (from env)\n");
+            return DECODE_BACKEND_AUTO;
+        }
         if (strcasecmp(backend_env, "nvidia") == 0 || 
             strcasecmp(backend_env, "cuvid") == 0) {
             printf("[Server] Forcing NVIDIA NVDEC backend (from env)\n");
@@ -361,7 +365,7 @@ static DecodeBackend get_decode_backend(void) {
             return DECODE_BACKEND_CPU;
         }
     }
-    return decoder_detect_backend();
+    return DECODE_BACKEND_AUTO;
 }
 
 static void handle_packet(TcpServer* server, ClientConn* client, 

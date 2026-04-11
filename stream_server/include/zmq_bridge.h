@@ -14,7 +14,7 @@
  *   json:
  *     {"stream_id": 1, "timeout_ms": 1000, "request_new": true}
  *   说明：收到请求时，会从对应流的 last_frame 按需生成 BGR24 并返回。
- *        如果 last_frame 还是硬件帧，则先下载到 CPU，再做 libyuv 转换。
+ *        如果 last_frame 还是硬件帧，则先下载到 CPU，再走统一像素格式适配层。
  *
  *   Reply multipart (client 看到):
  *     [status][meta_json][bgr24]

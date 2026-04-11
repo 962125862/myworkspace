@@ -112,6 +112,8 @@
 - `-d, --daemon`：守护进程
 - `-v, --verbose`：更详细日志
 - `--decode-backend <auto|intel|nvidia|cpu>`：默认后端偏好，默认 `auto`
+  - `auto`：保留为真正的自动模式，按流元信息走 `stream_server` 路由表；当前主机默认优先 `Intel`
+  - `intel/nvidia/cpu`：显式指定后端，直接跳过路由表
 - `--zmq-bridge-bind <addr>`：启用内置 ZMQ BGR bridge
 - `--stress-test`：压测模式
 - `--stress-copies <n>`：压测副本数
@@ -155,7 +157,7 @@
 - 编译期硬上限已经放宽到 `256`
 - 以后 `20 -> 35 -> 48` 这类扩容，优先改启动参数，不需要每次改代码重编
 - 如果要超过 `256`，才需要再次改代码
-和 NVDEC 保帧逻辑相关的环境变量是：
+和硬解保帧逻辑相关的环境变量是：
 
 - `STREAM_DEFER_HW_DOWNLOAD`
   - 默认 `on`

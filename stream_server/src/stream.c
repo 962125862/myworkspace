@@ -73,17 +73,17 @@ static const char* codec_name_from_stream_info(const StreamInfo* info) {
  * 3. Keep a short "reason" string so logs explain why a backend was chosen.
  *
  * Current policy:
- * - HEVC 4:4:4 goes to NVIDIA first, because Intel VAAPI on this host fails on 4:4:4 in practice.
- * - Everything else prefers Intel first.
+ * - Intel VAAPI is preferred first on this host, including HEVC 4:4:4.
+ * - If Intel init fails, runtime fallback still allows NVIDIA/CPU recovery.
  * - Runtime fallback order is handled in stream_init_decoder():
  *     Intel -> NVIDIA -> CPU
  *     NVIDIA -> CPU
  */
 static const DecodeRouteRule k_decode_route_rules[] = {
-    { STREAM_CODEC_HEVC, 1, ROUTE_ANY, DECODE_BACKEND_NVIDIA,
-      "HEVC 4:4:4 prefers NVIDIA on this host" },
+    { STREAM_CODEC_HEVC, 1, ROUTE_ANY, DECODE_BACKEND_INTEL_VA,
+      "HEVC 4:4:4 prefers Intel VAAPI on this host" },
     { ROUTE_ANY,         ROUTE_ANY, ROUTE_ANY, DECODE_BACKEND_INTEL_VA,
-      "non-HEVC444 prefers Intel VAAPI on this host" },
+      "Intel VAAPI preferred on this host" },
 };
 
 static int route_rule_matches(const DecodeRouteRule* rule, const StreamInfo* info) {
@@ -104,6 +104,13 @@ static int route_rule_matches(const DecodeRouteRule* rule, const StreamInfo* inf
 
 static DecodeBackend adjust_backend_for_stream(const StreamInfo* info, DecodeBackend backend) {
     if (!info) {
+        return backend;
+    }
+
+    if (backend != DECODE_BACKEND_AUTO) {
+        printf("[Stream] explicit backend override: codec=%s chroma=%u bitdepth=%u -> %s\n",
+               codec_name_from_stream_info(info), info->chroma, info->bitdepth,
+               decoder_backend_name(backend));
         return backend;
     }
 
@@ -385,8 +392,8 @@ int stream_init_decoder(StreamContext* stream, int backend) {
      *   Intel -> NVIDIA -> CPU
      *   NVIDIA -> CPU
      *   CPU only
-     * This keeps 4:2:0 on Intel when available, but still allows NVIDIA
-     * to rescue streams that Intel cannot initialize.
+     * This keeps Intel as the default decode path on this host while still
+     * allowing NVIDIA to rescue streams that Intel cannot initialize.
      */
     for (size_t i = 0; i < attempt_count; i++) {
         config.backend = attempted_backends[i];
@@ -402,7 +409,7 @@ int stream_init_decoder(StreamContext* stream, int backend) {
         fprintf(stderr,
                 "[Stream %d] Decoder init failed with %s, %s\n",
                 stream->stream_id, decoder_backend_name(config.backend),
-                (i + 1 < attempt_count) ? "retrying CPU fallback" : "no more fallbacks");
+                (i + 1 < attempt_count) ? "retrying next fallback" : "no more fallbacks");
         decoder_destroy(ctx);
         ctx = NULL;
     }

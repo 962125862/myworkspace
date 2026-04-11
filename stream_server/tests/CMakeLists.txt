@@ -36,4 +36,14 @@ target_link_libraries(benchmark_10streams
     pthread
 )
 
+# 单文件真实解码测试
+add_executable(test_file_decode test_file_decode.c ${DECODER_SOURCES})
+target_include_directories(test_file_decode PRIVATE ../include ${FFMPEG_INCLUDE_DIRS})
+target_compile_definitions(test_file_decode PRIVATE ${HWACCEL_DEFS})
+target_link_libraries(test_file_decode
+    ${FFMPEG_LIBRARIES}
+    ${HWACCEL_LIBS}
+    m
+)
+
 # 20路硬件解码压力测试 (已移到上级 CMakeLists.txt)

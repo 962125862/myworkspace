@@ -20,6 +20,10 @@
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 
+#ifdef HAVE_LIBYUV
+#include <libyuv/convert_argb.h>
+#endif
+
 /* Intel VA-API */
 #ifdef HAVE_VAAPI
 #include <libavutil/hwcontext_vaapi.h>
@@ -80,6 +84,16 @@ static pthread_mutex_t g_cuda_device_mu = PTHREAD_MUTEX_INITIALIZER;
 static AVBufferRef* g_cuda_device_master = NULL;
 static int g_cuda_device_id = -1;
 static unsigned g_cuda_device_users = 0;
+
+#define STREAM_COLORSPACE_REC_601 0u
+#define STREAM_COLORSPACE_REC_709 1u
+#define STREAM_COLOR_RANGE_LIMITED 0u
+#define STREAM_COLOR_RANGE_FULL 1u
+
+static const char* pix_fmt_name_or_unknown(enum AVPixelFormat fmt) {
+    const char* name = av_get_pix_fmt_name(fmt);
+    return name ? name : "unknown";
+}
 
 static double elapsed_ms_since(const struct timespec* start,
                                const struct timespec* end) {
@@ -179,6 +193,10 @@ static enum AVPixelFormat av_format_from_decode(DecodeFormat fmt) {
             return AV_PIX_FMT_YUV420P;
         case DECODE_FMT_YUV444P:
             return AV_PIX_FMT_YUV444P;
+        case DECODE_FMT_VUYX:
+            return AV_PIX_FMT_VUYX;
+        case DECODE_FMT_BGR24:
+            return AV_PIX_FMT_BGR24;
         case DECODE_FMT_BGRA:
             return AV_PIX_FMT_BGRA;
         case DECODE_FMT_RGB24:
@@ -202,18 +220,28 @@ static enum AVPixelFormat hw_frame_sw_format(const AVFrame* frame) {
     return frames_ctx->sw_format;
 }
 
+static void finalize_transferred_sw_frame(AVFrame* sw_frame, const AVFrame* hw_frame) {
+    if (!sw_frame || !hw_frame) {
+        return;
+    }
+
+    if (sw_frame->format == AV_PIX_FMT_NONE) {
+        enum AVPixelFormat sw_fmt = hw_frame_sw_format(hw_frame);
+        if (sw_fmt != AV_PIX_FMT_NONE) {
+            sw_frame->format = sw_fmt;
+        }
+    }
+    if (sw_frame->width <= 0) {
+        sw_frame->width = hw_frame->width;
+    }
+    if (sw_frame->height <= 0) {
+        sw_frame->height = hw_frame->height;
+    }
+}
+
 /* 检测硬件支持 */
 DecodeBackend decoder_detect_backend(void) {
-    /* 优先检测 NVIDIA */
-    AVBufferRef* cuda_ctx = NULL;
-    if (av_hwdevice_ctx_create(&cuda_ctx, AV_HWDEVICE_TYPE_CUDA, 
-                               NULL, NULL, 0) >= 0) {
-        av_buffer_unref(&cuda_ctx);
-        printf("[Decoder] NVIDIA CUDA detected\n");
-        return DECODE_BACKEND_NVIDIA;
-    }
-    
-    /* 检测 Intel VA-API - 尝试多个设备 */
+    /* 优先检测 Intel VA-API - 尝试多个设备 */
     const char* va_devices[] = {
         "/dev/dri/renderD128",
         "/dev/dri/renderD129",
@@ -228,6 +256,15 @@ DecodeBackend decoder_detect_backend(void) {
             printf("[Decoder] Intel VA-API detected (%s)\n", va_devices[i]);
             return DECODE_BACKEND_INTEL_VA;
         }
+    }
+
+    /* 检测 NVIDIA */
+    AVBufferRef* cuda_ctx = NULL;
+    if (av_hwdevice_ctx_create(&cuda_ctx, AV_HWDEVICE_TYPE_CUDA,
+                               NULL, NULL, 0) >= 0) {
+        av_buffer_unref(&cuda_ctx);
+        printf("[Decoder] NVIDIA CUDA detected\n");
+        return DECODE_BACKEND_NVIDIA;
     }
     
     printf("[Decoder] No hardware acceleration, using CPU\n");
@@ -338,6 +375,14 @@ static enum AVPixelFormat choose_software_format(const enum AVPixelFormat* pix_f
     return AV_PIX_FMT_NONE;
 }
 
+static enum AVPixelFormat choose_decoder_sw_format(AVCodecContext* ctx,
+                                                   const enum AVPixelFormat* pix_fmts) {
+    if (ctx && ctx->sw_pix_fmt != AV_PIX_FMT_NONE) {
+        return ctx->sw_pix_fmt;
+    }
+    return choose_software_format(pix_fmts);
+}
+
 static enum AVPixelFormat get_hw_format(AVCodecContext* ctx, 
                                         const enum AVPixelFormat* pix_fmts) {
     DecoderCtx* dec_ctx = (DecoderCtx*)ctx->opaque;
@@ -362,61 +407,18 @@ static enum AVPixelFormat get_hw_format(AVCodecContext* ctx,
 /* VA-API 格式回调 (参考 embedded ffmpeg_vaapi.c va_get_format) */
 static enum AVPixelFormat vaapi_get_format(AVCodecContext* ctx,
                                            const enum AVPixelFormat* pix_fmts) {
-    DecoderCtx* dec_ctx = (DecoderCtx*)ctx->opaque;
-    const enum AVPixelFormat* p;
+    enum AVPixelFormat hw_sw_fmt = choose_decoder_sw_format(ctx, pix_fmts);
+    enum AVPixelFormat chosen = get_hw_format(ctx, pix_fmts);
 
-    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if (*p == AV_PIX_FMT_VAAPI) {
-            break;
-        }
-    }
-    if (*p == AV_PIX_FMT_NONE) {
-        enum AVPixelFormat sw_fmt = choose_software_format(pix_fmts);
-        if (sw_fmt != AV_PIX_FMT_NONE) {
-            fprintf(stderr,
-                    "[Decoder] VAAPI unsupported for this stream, fallback sw fmt=%d\n",
-                    sw_fmt);
-            return sw_fmt;
-        }
-        return AV_PIX_FMT_NONE;
+    if (chosen == AV_PIX_FMT_VAAPI) {
+        printf("[Decoder] VAAPI selected hw format (sw_format=%s)\n",
+               pix_fmt_name_or_unknown(hw_sw_fmt));
+    } else if (chosen != AV_PIX_FMT_NONE) {
+        fprintf(stderr, "[Decoder] VAAPI fallback to software format=%s\n",
+                pix_fmt_name_or_unknown(chosen));
     }
 
-    /* 创建硬件帧上下文 */
-    AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(dec_ctx->hw_device_ctx);
-    if (!hw_frames_ref) {
-        fprintf(stderr, "[Decoder] Failed to allocate VAAPI frame context\n");
-        return get_hw_format(ctx, pix_fmts);
-    }
-
-    AVHWFramesContext* frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
-    frames_ctx->format = AV_PIX_FMT_VAAPI;
-    frames_ctx->sw_format = AV_PIX_FMT_NV12;
-    frames_ctx->width = ctx->coded_width;
-    frames_ctx->height = ctx->coded_height;
-    frames_ctx->initial_pool_size = MAX_SURFACES + 1;
-
-    if (av_hwframe_ctx_init(hw_frames_ref) < 0) {
-        fprintf(stderr, "[Decoder] Failed to initialize VAAPI frame context\n");
-        av_buffer_unref(&hw_frames_ref);
-        return get_hw_format(ctx, pix_fmts);
-    }
-
-    ctx->pix_fmt = AV_PIX_FMT_VAAPI;
-    ctx->hw_device_ctx = av_buffer_ref(dec_ctx->hw_device_ctx);
-    ctx->hw_frames_ctx = hw_frames_ref;
-
-    printf("[Decoder] VAAPI frame context initialized (%dx%d)\n",
-           ctx->coded_width, ctx->coded_height);
-    return AV_PIX_FMT_VAAPI;
-}
-
-/*
- * 硬件缓冲区分配回调 (VA-API 使用)
- * NVIDIA CUDA 不需要此回调 - FFmpeg 会自动管理
- */
-static int hw_get_buffer(AVCodecContext* ctx, AVFrame* frame, int flags) {
-    (void)flags;
-    return av_hwframe_get_buffer(ctx->hw_frames_ctx, frame, 0);
+    return chosen;
 }
 
 static DecodeFormat decode_format_from_av(enum AVPixelFormat fmt) {
@@ -427,6 +429,12 @@ static DecodeFormat decode_format_from_av(enum AVPixelFormat fmt) {
             return DECODE_FMT_YUV420P;
         case AV_PIX_FMT_YUV444P:
             return DECODE_FMT_YUV444P;
+        case AV_PIX_FMT_VUYX:
+            return DECODE_FMT_VUYX;
+        case AV_PIX_FMT_BGR24:
+            return DECODE_FMT_BGR24;
+        case AV_PIX_FMT_RGB24:
+            return DECODE_FMT_RGB24;
         default:
             return DECODE_FMT_NONE;
     }
@@ -460,6 +468,8 @@ static int plane_height_for_pix_fmt(enum AVPixelFormat fmt, int plane, int heigh
         case AV_PIX_FMT_YUV444P:
             /* Y/U/V: H */
             return (plane >= 0 && plane <= 2) ? height : 0;
+        case AV_PIX_FMT_VUYX:
+        case AV_PIX_FMT_BGR24:
         case AV_PIX_FMT_BGRA:
         case AV_PIX_FMT_RGBA:
         case AV_PIX_FMT_RGB24:
@@ -674,12 +684,15 @@ int decoder_init(DecoderCtx* ctx, const uint8_t* extradata, int extradata_size) 
             ctx->config.backend = DECODE_BACKEND_CPU;
             ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
         } else {
-            /* 设置回调函数 (关键!) */
+            /* 按 FFmpeg hw_decode 示例走标准 VAAPI decode 初始化 */
             ctx->codec_ctx->get_format = vaapi_get_format;
-            ctx->codec_ctx->get_buffer2 = hw_get_buffer;
+            ctx->codec_ctx->hw_device_ctx = av_buffer_ref(ctx->hw_device_ctx);
             if (ctx->config.extra_hw_frames > 0) {
                 ctx->codec_ctx->extra_hw_frames = ctx->config.extra_hw_frames;
+            } else if (ctx->config.defer_hw_download) {
+                ctx->codec_ctx->extra_hw_frames = 24;
             }
+            ctx->codec_ctx->thread_count = 1;
         }
     }
     else if (ctx->config.backend == DECODE_BACKEND_NVIDIA) {
@@ -927,6 +940,7 @@ int decoder_decode(DecoderCtx* ctx, const uint8_t* data, int size,
                                             elapsed_ms_since(&xfer_start, &xfer_end));
 
                     av_frame_copy_props(tmp_frame, ctx->frame);
+                    finalize_transferred_sw_frame(tmp_frame, ctx->frame);
                     out_avf = tmp_frame;
                     take_ownership = true;
                 }
@@ -1062,6 +1076,7 @@ int decoder_materialize_frame(const DecodedFrame* src, DecodedFrame** out_frame)
     record_hw_transfer_time((DecoderTransferStats*)src->_decoder_ctx,
                             elapsed_ms_since(&xfer_start, &xfer_end));
     av_frame_copy_props(sw_frame, hw_frame);
+    finalize_transferred_sw_frame(sw_frame, hw_frame);
 
     DecodedFrame* dst = calloc(1, sizeof(*dst));
     if (!dst) {
@@ -1130,6 +1145,7 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
             record_hw_transfer_time(ctx->transfer_stats,
                                     elapsed_ms_since(&xfer_start, &xfer_end));
             av_frame_copy_props(tmp_frame, ctx->frame);
+            finalize_transferred_sw_frame(tmp_frame, ctx->frame);
             out_avf = tmp_frame;
             take_ownership = true;
         }
@@ -1148,9 +1164,233 @@ int decoder_flush(DecoderCtx* ctx, DecodedFrame** out_frame) {
     return 0;
 }
 
-int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
-                           DecodedFrame* dst, DecodeFormat target_format) {
-    if (!ctx || !src || !dst) return -1;
+static int decode_format_bytes_per_pixel(DecodeFormat fmt) {
+    switch (fmt) {
+        case DECODE_FMT_BGR24:
+        case DECODE_FMT_RGB24:
+            return 3;
+        case DECODE_FMT_BGRA:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+#ifdef HAVE_LIBYUV
+static const struct YuvConstants* bgr_yuv_constants_from_info(const StreamInfo* info) {
+    uint32_t color_space = info ? info->color_space : STREAM_COLORSPACE_REC_709;
+    uint32_t color_range = info ? info->color_range : STREAM_COLOR_RANGE_LIMITED;
+
+    if (color_space == STREAM_COLORSPACE_REC_601) {
+        return (color_range == STREAM_COLOR_RANGE_FULL)
+             ? &kYvuJPEGConstants
+             : &kYvuI601Constants;
+    }
+
+    return (color_range == STREAM_COLOR_RANGE_FULL)
+         ? &kYvuF709Constants
+         : &kYvuH709Constants;
+}
+
+static int decoder_fast_convert_to_bgr24(const DecodedFrame* src,
+                                         const StreamInfo* info,
+                                         DecodedFrame* dst) {
+    if (!src || !dst || !src->data[0] || src->width <= 0 || src->height <= 0) {
+        return -1;
+    }
+
+    const struct YuvConstants* yuv_constants = bgr_yuv_constants_from_info(info);
+
+    dst->width = src->width;
+    dst->height = src->height;
+    dst->format = DECODE_FMT_BGR24;
+    dst->storage = DECODE_STORAGE_CPU;
+    dst->pts = src->pts;
+    dst->key_frame = src->key_frame;
+    dst->av_frame = NULL;
+    dst->_decoder_ctx = NULL;
+    memset(dst->data, 0, sizeof(dst->data));
+    memset(dst->linesize, 0, sizeof(dst->linesize));
+    dst->linesize[0] = src->width * 3;
+    dst->data[0] = malloc((size_t)dst->linesize[0] * (size_t)src->height);
+    if (!dst->data[0]) {
+        return -1;
+    }
+
+    int ret = -1;
+    switch (src->format) {
+        case DECODE_FMT_NV12:
+            ret = NV12ToRGB24Matrix(
+                src->data[0], src->linesize[0],
+                src->data[1], src->linesize[1],
+                dst->data[0], dst->linesize[0],
+                yuv_constants,
+                src->width, src->height);
+            break;
+        case DECODE_FMT_YUV420P:
+            ret = I420ToRGB24Matrix(
+                src->data[0], src->linesize[0],
+                src->data[1], src->linesize[1],
+                src->data[2], src->linesize[2],
+                dst->data[0], dst->linesize[0],
+                yuv_constants,
+                src->width, src->height);
+            break;
+        case DECODE_FMT_YUV444P:
+            ret = I444ToRGB24Matrix(
+                src->data[0], src->linesize[0],
+                src->data[1], src->linesize[1],
+                src->data[2], src->linesize[2],
+                dst->data[0], dst->linesize[0],
+                yuv_constants,
+                src->width, src->height);
+            break;
+        default:
+            ret = -1;
+            break;
+    }
+
+    if (ret != 0) {
+        free(dst->data[0]);
+        dst->data[0] = NULL;
+        dst->linesize[0] = 0;
+        return -1;
+    }
+
+    return 0;
+}
+#endif
+
+static void infer_sws_color_details(const StreamInfo* info, const DecodedFrame* src,
+                                    int* coeffs_out, int* src_range_out) {
+    int coeffs = SWS_CS_ITU709;
+    int src_range = 0;
+
+    if (info) {
+        coeffs = (info->color_space == STREAM_COLORSPACE_REC_601)
+               ? SWS_CS_ITU601
+               : SWS_CS_ITU709;
+        src_range = (info->color_range == STREAM_COLOR_RANGE_FULL) ? 1 : 0;
+    } else if (src && src->av_frame) {
+        const AVFrame* avf = (const AVFrame*)src->av_frame;
+        switch (avf->colorspace) {
+            case AVCOL_SPC_BT470BG:
+            case AVCOL_SPC_SMPTE170M:
+            case AVCOL_SPC_FCC:
+                coeffs = SWS_CS_ITU601;
+                break;
+            case AVCOL_SPC_BT709:
+            default:
+                coeffs = SWS_CS_ITU709;
+                break;
+        }
+
+        if (avf->color_range == AVCOL_RANGE_JPEG) {
+            src_range = 1;
+        } else if (avf->color_range == AVCOL_RANGE_MPEG) {
+            src_range = 0;
+        }
+    }
+
+    if (coeffs_out) {
+        *coeffs_out = coeffs;
+    }
+    if (src_range_out) {
+        *src_range_out = src_range;
+    }
+}
+
+static int decoder_convert_with_sws(DecoderCtx* ctx, const DecodedFrame* src,
+                                    const StreamInfo* info,
+                                    DecodedFrame* dst, DecodeFormat target_format) {
+    enum AVPixelFormat src_pix_fmt = av_format_from_decode(src->format);
+    enum AVPixelFormat dst_pix_fmt = av_format_from_decode(target_format);
+    const int bytes_per_pixel = decode_format_bytes_per_pixel(target_format);
+    struct SwsContext* sws_ctx = ctx ? ctx->sws_ctx : NULL;
+
+    if (src_pix_fmt == AV_PIX_FMT_NONE || dst_pix_fmt == AV_PIX_FMT_NONE || bytes_per_pixel <= 0) {
+        return -1;
+    }
+
+    sws_ctx = sws_getCachedContext(
+        sws_ctx,
+        src->width, src->height, src_pix_fmt,
+        src->width, src->height, dst_pix_fmt,
+        SWS_BILINEAR, NULL, NULL, NULL);
+    if (!sws_ctx) {
+        return -1;
+    }
+    if (ctx) {
+        ctx->sws_ctx = sws_ctx;
+    }
+
+    int coeffs = SWS_CS_ITU709;
+    int src_range = 0;
+    infer_sws_color_details(info, src, &coeffs, &src_range);
+    if (sws_setColorspaceDetails(
+            sws_ctx,
+            sws_getCoefficients(coeffs), src_range,
+            sws_getCoefficients(coeffs), 1,
+            0, 1 << 16, 1 << 16) < 0) {
+        if (!ctx) {
+            sws_freeContext(sws_ctx);
+        }
+        return -1;
+    }
+
+    dst->width = src->width;
+    dst->height = src->height;
+    dst->format = target_format;
+    dst->storage = DECODE_STORAGE_CPU;
+    dst->pts = src->pts;
+    dst->key_frame = src->key_frame;
+    dst->av_frame = NULL;
+    dst->_decoder_ctx = NULL;
+    memset(dst->data, 0, sizeof(dst->data));
+    memset(dst->linesize, 0, sizeof(dst->linesize));
+    dst->linesize[0] = src->width * bytes_per_pixel;
+    dst->data[0] = malloc((size_t)dst->linesize[0] * (size_t)src->height);
+    if (!dst->data[0]) {
+        if (!ctx) {
+            sws_freeContext(sws_ctx);
+        }
+        return -1;
+    }
+
+    const uint8_t* src_data[4] = { src->data[0], NULL, NULL, NULL };
+    int src_linesize[4] = { src->linesize[0], 0, 0, 0 };
+    uint8_t* dst_data[4] = { dst->data[0], NULL, NULL, NULL };
+    int dst_linesize[4] = { dst->linesize[0], 0, 0, 0 };
+
+    if (src->format == DECODE_FMT_YUV420P || src->format == DECODE_FMT_YUV444P) {
+        src_data[1] = src->data[1];
+        src_data[2] = src->data[2];
+        src_linesize[1] = src->linesize[1];
+        src_linesize[2] = src->linesize[2];
+    } else if (src->format == DECODE_FMT_NV12) {
+        src_data[1] = src->data[1];
+        src_linesize[1] = src->linesize[1];
+    }
+
+    const int scaled = sws_scale(sws_ctx, src_data, src_linesize, 0, src->height,
+                                 dst_data, dst_linesize);
+    if (!ctx) {
+        sws_freeContext(sws_ctx);
+    }
+    if (scaled <= 0) {
+        free(dst->data[0]);
+        dst->data[0] = NULL;
+        dst->linesize[0] = 0;
+        return -1;
+    }
+
+    return 0;
+}
+
+int decoder_convert_format_with_info(DecoderCtx* ctx, const DecodedFrame* src,
+                                     const StreamInfo* info,
+                                     DecodedFrame* dst, DecodeFormat target_format) {
+    if (!src || !dst) return -1;
 
     const DecodedFrame* conv_src = src;
     DecodedFrame* materialized = NULL;
@@ -1161,72 +1401,35 @@ int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
         conv_src = materialized;
     }
 
-    /* 允许 NV12 / YUV420P / YUV444P -> BGRA */
-    if (target_format != DECODE_FMT_BGRA) {
+    if (target_format != DECODE_FMT_BGRA &&
+        target_format != DECODE_FMT_BGR24 &&
+        target_format != DECODE_FMT_RGB24) {
         decoder_free_frame(materialized);
         return -1;
     }
 
-    enum AVPixelFormat src_pix_fmt;
-    switch (conv_src->format) {
-        case DECODE_FMT_NV12:
-            src_pix_fmt = AV_PIX_FMT_NV12;
-            break;
-        case DECODE_FMT_YUV420P:
-            src_pix_fmt = AV_PIX_FMT_YUV420P;
-            break;
-        case DECODE_FMT_YUV444P:
-            src_pix_fmt = AV_PIX_FMT_YUV444P;
-            break;
-        default:
-            decoder_free_frame(materialized);
-            return -1;
+    memset(dst, 0, sizeof(*dst));
+
+#ifdef HAVE_LIBYUV
+    if (target_format == DECODE_FMT_BGR24 &&
+        decoder_fast_convert_to_bgr24(conv_src, info, dst) == 0) {
+        decoder_free_frame(materialized);
+        return 0;
     }
-    
-    /* 初始化 SwsContext（如果未初始化） */
-    if (!ctx->sws_ctx) {
-        ctx->sws_ctx = sws_getContext(
-            conv_src->width, conv_src->height, src_pix_fmt,
-            conv_src->width, conv_src->height, AV_PIX_FMT_BGRA,
-            SWS_BILINEAR, NULL, NULL, NULL
-        );
-        if (!ctx->sws_ctx) {
-            decoder_free_frame(materialized);
-            return -1;
-        }
-    }
-    
-    /* 分配目标帧内存 */
-    dst->width = conv_src->width;
-    dst->height = conv_src->height;
-    dst->format = target_format;
-    dst->storage = DECODE_STORAGE_CPU;
-    dst->pts = conv_src->pts;
-    dst->key_frame = conv_src->key_frame;
-    
-    /* BGRA 每像素 4 字节 */
-    dst->linesize[0] = conv_src->width * 4;
-    dst->data[0] = malloc((size_t)dst->linesize[0] * (size_t)conv_src->height);
-    if (!dst->data[0]) {
+#endif
+
+    if (decoder_convert_with_sws(ctx, conv_src, info, dst, target_format) != 0) {
         decoder_free_frame(materialized);
         return -1;
     }
-    
-    /* 执行转换 */
-    const uint8_t* src_data[4] = { conv_src->data[0], conv_src->data[1], conv_src->data[2], NULL };
-    uint8_t* dst_data[4] = { dst->data[0], NULL, NULL, NULL };
-    int src_linesize[4] = { conv_src->linesize[0], conv_src->linesize[1], 0, 0 };
-    int dst_linesize[4] = { dst->linesize[0], 0, 0, 0 };
-
-    if (conv_src->format == DECODE_FMT_YUV420P || conv_src->format == DECODE_FMT_YUV444P) {
-        src_linesize[2] = conv_src->linesize[2];
-    }
-    
-    sws_scale(ctx->sws_ctx, src_data, src_linesize, 0, conv_src->height,
-              dst_data, dst_linesize);
 
     decoder_free_frame(materialized);
     return 0;
+}
+
+int decoder_convert_format(DecoderCtx* ctx, const DecodedFrame* src,
+                           DecodedFrame* dst, DecodeFormat target_format) {
+    return decoder_convert_format_with_info(ctx, src, NULL, dst, target_format);
 }
 
 void decoder_get_stats(DecoderCtx* ctx, DecoderStats* stats) {

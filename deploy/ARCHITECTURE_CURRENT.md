@@ -129,8 +129,10 @@ strem_agent_client
 
 当前固定规则：
 
-- `HEVC444 -> NVIDIA`
-- 其他流 -> `Intel`
+- `DECODE_BACKEND=auto` 时按流元信息走路由表
+- 当前主机上 `HEVC444 -> Intel`
+- 其他流也优先 `Intel`
+- 如果显式指定 `intel/nvidia/cpu`，则直接跳过路由表
 
 ### 4.2 回退规则
 
@@ -148,8 +150,13 @@ strem_agent_client
 
 补充说明：
 
-- 如果 `last_frame` 当前是 CPU 帧，直接做 libyuv 转换
-- 如果 `last_frame` 当前是 NVDEC/VAAPI 硬件帧，先按需下载到 CPU，再做 libyuv 转换
+- 如果 `last_frame` 当前是 NVDEC/VAAPI 硬件帧，先按需下载到 CPU
+- 之后统一走 `decoder_convert_format_with_info(..., DECODE_FMT_BGR24)`
+- 已知快路径：
+  - `NV12/YUV420P/YUV444P -> BGR24` 走 `libyuv`
+- 兜底路径：
+  - `VUYX` 等没有专门快路径的 CPU 格式，回退到 `FFmpeg swscale`
+- `libyuv` 和 `swscale` 都使用 `STREAM_START` 透传下来的 `color_space/color_range`
 
 ## 5. ZMQ 架构
 
