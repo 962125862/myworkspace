@@ -120,6 +120,12 @@ docker exec -it agent_link_service bash -lc 'ls -la /app/workers; echo; sed -n "
 docker exec -it agent_link_service bash -lc '/app/mlctl.sh restart worker_s1'
 ```
 
+例如，把现有 `worker_s21` 改成 `2560x1440` 并立即重启：
+
+```bash
+ssh 192.168.11.31 'docker exec agent_link_service bash -lc "sed -i -e \"s/^WIDTH=.*/WIDTH=\\\"2560\\\"/\" -e \"s/^HEIGHT=.*/HEIGHT=\\\"1440\\\"/\" /app/workers/worker_s21.conf && /app/mlctl.sh restart worker_s21"'
+```
+
 ## startLink
 
 配对成功后，客户端侧需要先调用 `startLink`（它会按需启动对应 `stream_id` 的 `ml_worker` 容器推流）：
