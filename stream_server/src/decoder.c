@@ -24,6 +24,10 @@
 #include <libyuv/convert_argb.h>
 #endif
 
+#if defined(HAVE_LIBYUV) && (defined(__x86_64__) || defined(__i386__))
+#include <immintrin.h>
+#endif
+
 /* Intel VA-API */
 #ifdef HAVE_VAAPI
 #include <libavutil/hwcontext_vaapi.h>
@@ -43,6 +47,17 @@ typedef struct DecoderTransferStats {
     uint64_t hw_transfer_count;
     double total_hw_transfer_time;
 } DecoderTransferStats;
+
+typedef struct DecoderConvertStatsInternal {
+    pthread_mutex_t lock;
+    uint64_t bgr24_request_count;
+    uint64_t libyuv_bgr24_count;
+    double total_libyuv_bgr24_time_ms;
+    uint64_t vuyx_bgr24_count;
+    double total_vuyx_bgr24_time_ms;
+    uint64_t swscale_count;
+    double total_swscale_time_ms;
+} DecoderConvertStatsInternal;
 
 /* 解码器上下文 */
 struct DecoderCtx {
@@ -84,11 +99,61 @@ static pthread_mutex_t g_cuda_device_mu = PTHREAD_MUTEX_INITIALIZER;
 static AVBufferRef* g_cuda_device_master = NULL;
 static int g_cuda_device_id = -1;
 static unsigned g_cuda_device_users = 0;
+static DecoderConvertStatsInternal g_convert_stats = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+static pthread_once_t g_tls_sws_key_once = PTHREAD_ONCE_INIT;
+static pthread_key_t g_tls_sws_key;
+static int g_tls_sws_key_ready = 0;
 
 #define STREAM_COLORSPACE_REC_601 0u
 #define STREAM_COLORSPACE_REC_709 1u
 #define STREAM_COLOR_RANGE_LIMITED 0u
 #define STREAM_COLOR_RANGE_FULL 1u
+
+static void free_tls_sws_ctx(void* ptr) {
+    if (ptr) {
+        sws_freeContext((struct SwsContext*)ptr);
+    }
+}
+
+static void init_tls_sws_key(void) {
+    if (pthread_key_create(&g_tls_sws_key, free_tls_sws_ctx) == 0) {
+        g_tls_sws_key_ready = 1;
+    }
+}
+
+static struct SwsContext* decoder_get_cached_sws_ctx(DecoderCtx* ctx, int* uses_tls_cache) {
+    if (uses_tls_cache) {
+        *uses_tls_cache = 0;
+    }
+
+    if (ctx) {
+        return ctx->sws_ctx;
+    }
+
+    pthread_once(&g_tls_sws_key_once, init_tls_sws_key);
+    if (!g_tls_sws_key_ready) {
+        return NULL;
+    }
+
+    if (uses_tls_cache) {
+        *uses_tls_cache = 1;
+    }
+    return (struct SwsContext*)pthread_getspecific(g_tls_sws_key);
+}
+
+static void decoder_store_cached_sws_ctx(DecoderCtx* ctx, struct SwsContext* sws_ctx,
+                                         int uses_tls_cache) {
+    if (ctx) {
+        ctx->sws_ctx = sws_ctx;
+        return;
+    }
+
+    if (uses_tls_cache) {
+        (void)pthread_setspecific(g_tls_sws_key, sws_ctx);
+    }
+}
 
 static const char* pix_fmt_name_or_unknown(enum AVPixelFormat fmt) {
     const char* name = av_get_pix_fmt_name(fmt);
@@ -99,6 +164,37 @@ static double elapsed_ms_since(const struct timespec* start,
                                const struct timespec* end) {
     return (end->tv_sec - start->tv_sec) * 1000.0 +
            (end->tv_nsec - start->tv_nsec) / 1000000.0;
+}
+
+typedef enum DecoderConvertPathKind {
+    DECODER_CONVERT_PATH_LIBYUV_BGR24 = 0,
+    DECODER_CONVERT_PATH_VUYX_BGR24,
+    DECODER_CONVERT_PATH_SWSCALE,
+} DecoderConvertPathKind;
+
+static void record_bgr24_request(void) {
+    pthread_mutex_lock(&g_convert_stats.lock);
+    g_convert_stats.bgr24_request_count++;
+    pthread_mutex_unlock(&g_convert_stats.lock);
+}
+
+static void record_convert_path_time(DecoderConvertPathKind kind, double elapsed_ms) {
+    pthread_mutex_lock(&g_convert_stats.lock);
+    switch (kind) {
+        case DECODER_CONVERT_PATH_LIBYUV_BGR24:
+            g_convert_stats.libyuv_bgr24_count++;
+            g_convert_stats.total_libyuv_bgr24_time_ms += elapsed_ms;
+            break;
+        case DECODER_CONVERT_PATH_VUYX_BGR24:
+            g_convert_stats.vuyx_bgr24_count++;
+            g_convert_stats.total_vuyx_bgr24_time_ms += elapsed_ms;
+            break;
+        case DECODER_CONVERT_PATH_SWSCALE:
+            g_convert_stats.swscale_count++;
+            g_convert_stats.total_swscale_time_ms += elapsed_ms;
+            break;
+    }
+    pthread_mutex_unlock(&g_convert_stats.lock);
 }
 
 static DecoderTransferStats* transfer_stats_create(void) {
@@ -1177,6 +1273,25 @@ static int decode_format_bytes_per_pixel(DecodeFormat fmt) {
 }
 
 #ifdef HAVE_LIBYUV
+typedef struct VuyxBgrCoeffs {
+    int y_offset;
+    int y_mul;
+    int vr_mul;
+    int gu_mul;
+    int gv_mul;
+    int bu_mul;
+} VuyxBgrCoeffs;
+
+static uint8_t clamp_u8_from_int(int value) {
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 255) {
+        return 255;
+    }
+    return (uint8_t)value;
+}
+
 static const struct YuvConstants* bgr_yuv_constants_from_info(const StreamInfo* info) {
     uint32_t color_space = info ? info->color_space : STREAM_COLORSPACE_REC_709;
     uint32_t color_range = info ? info->color_range : STREAM_COLOR_RANGE_LIMITED;
@@ -1192,11 +1307,237 @@ static const struct YuvConstants* bgr_yuv_constants_from_info(const StreamInfo* 
          : &kYvuH709Constants;
 }
 
+static void vuyx_bgr_coeffs_from_info(const StreamInfo* info, VuyxBgrCoeffs* coeffs) {
+    uint32_t color_space = info ? info->color_space : STREAM_COLORSPACE_REC_709;
+    uint32_t color_range = info ? info->color_range : STREAM_COLOR_RANGE_LIMITED;
+
+    if (!coeffs) {
+        return;
+    }
+
+    if (color_space == STREAM_COLORSPACE_REC_601) {
+        if (color_range == STREAM_COLOR_RANGE_FULL) {
+            *coeffs = (VuyxBgrCoeffs){
+                .y_offset = 0,
+                .y_mul = 256,
+                .vr_mul = 359,
+                .gu_mul = 88,
+                .gv_mul = 183,
+                .bu_mul = 454,
+            };
+            return;
+        }
+
+        *coeffs = (VuyxBgrCoeffs){
+            .y_offset = 16,
+            .y_mul = 298,
+            .vr_mul = 409,
+            .gu_mul = 100,
+            .gv_mul = 208,
+            .bu_mul = 516,
+        };
+        return;
+    }
+
+    if (color_range == STREAM_COLOR_RANGE_FULL) {
+        *coeffs = (VuyxBgrCoeffs){
+            .y_offset = 0,
+            .y_mul = 256,
+            .vr_mul = 403,
+            .gu_mul = 48,
+            .gv_mul = 120,
+            .bu_mul = 475,
+        };
+        return;
+    }
+
+    *coeffs = (VuyxBgrCoeffs){
+        .y_offset = 16,
+        .y_mul = 298,
+        .vr_mul = 459,
+        .gu_mul = 55,
+        .gv_mul = 136,
+        .bu_mul = 541,
+    };
+}
+
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+static int decoder_can_use_vuyx_avx2(void) {
+    return __builtin_cpu_supports("avx2") &&
+           __builtin_cpu_supports("sse4.1") &&
+           __builtin_cpu_supports("ssse3");
+}
+
+__attribute__((target("avx2,sse4.1,ssse3")))
+static int decoder_fast_convert_vuyx_to_bgr24_row_avx2(const uint8_t* src_row,
+                                                       uint8_t* dst_row,
+                                                       int width,
+                                                       const VuyxBgrCoeffs* coeffs) {
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256i y_offset = _mm256_set1_epi32(coeffs->y_offset);
+    const __m256i c128 = _mm256_set1_epi32(128);
+    const __m256i c255 = _mm256_set1_epi32(255);
+    const __m256i c_u8_bias = _mm256_set1_epi32(128);
+    const __m256i y_mul = _mm256_set1_epi32(coeffs->y_mul);
+    const __m256i vr_mul = _mm256_set1_epi32(coeffs->vr_mul);
+    const __m256i gu_mul = _mm256_set1_epi32(coeffs->gu_mul);
+    const __m256i gv_mul = _mm256_set1_epi32(coeffs->gv_mul);
+    const __m256i bu_mul = _mm256_set1_epi32(coeffs->bu_mul);
+    const __m256i pick_v = _mm256_setr_epi8(
+        0, 4, 8, 12, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 4, 8, 12, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m256i pick_u = _mm256_setr_epi8(
+        1, 5, 9, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        1, 5, 9, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m256i pick_y = _mm256_setr_epi8(
+        2, 6, 10, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        2, 6, 10, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+
+    int x = 0;
+    for (; x + 8 <= width; x += 8) {
+        const __m256i raw = _mm256_loadu_si256((const __m256i*)(src_row + (size_t)x * 4u));
+        const __m256i v_shuf = _mm256_shuffle_epi8(raw, pick_v);
+        const __m256i u_shuf = _mm256_shuffle_epi8(raw, pick_u);
+        const __m256i y_shuf = _mm256_shuffle_epi8(raw, pick_y);
+
+        const __m128i v_bytes = _mm_unpacklo_epi32(
+            _mm256_castsi256_si128(v_shuf), _mm256_extracti128_si256(v_shuf, 1));
+        const __m128i u_bytes = _mm_unpacklo_epi32(
+            _mm256_castsi256_si128(u_shuf), _mm256_extracti128_si256(u_shuf, 1));
+        const __m128i y_bytes = _mm_unpacklo_epi32(
+            _mm256_castsi256_si128(y_shuf), _mm256_extracti128_si256(y_shuf, 1));
+
+        const __m256i v32 = _mm256_sub_epi32(_mm256_cvtepu8_epi32(v_bytes), c_u8_bias);
+        const __m256i u32 = _mm256_sub_epi32(_mm256_cvtepu8_epi32(u_bytes), c_u8_bias);
+        __m256i y32 = _mm256_sub_epi32(_mm256_cvtepu8_epi32(y_bytes), y_offset);
+
+        y32 = _mm256_max_epi32(y32, zero);
+        const __m256i y_term = _mm256_mullo_epi32(y32, y_mul);
+        const __m256i b32 = _mm256_srai_epi32(
+            _mm256_add_epi32(_mm256_add_epi32(y_term, _mm256_mullo_epi32(u32, bu_mul)), c128), 8);
+        const __m256i g32 = _mm256_srai_epi32(
+            _mm256_add_epi32(
+                _mm256_sub_epi32(
+                    _mm256_sub_epi32(y_term, _mm256_mullo_epi32(u32, gu_mul)),
+                    _mm256_mullo_epi32(v32, gv_mul)),
+                c128),
+            8);
+        const __m256i r32 = _mm256_srai_epi32(
+            _mm256_add_epi32(_mm256_add_epi32(y_term, _mm256_mullo_epi32(v32, vr_mul)), c128), 8);
+
+        const __m256i b_clamped = _mm256_min_epi32(_mm256_max_epi32(b32, zero), c255);
+        const __m256i g_clamped = _mm256_min_epi32(_mm256_max_epi32(g32, zero), c255);
+        const __m256i r_clamped = _mm256_min_epi32(_mm256_max_epi32(r32, zero), c255);
+
+        const __m128i b16 = _mm_packus_epi32(
+            _mm256_castsi256_si128(b_clamped), _mm256_extracti128_si256(b_clamped, 1));
+        const __m128i g16 = _mm_packus_epi32(
+            _mm256_castsi256_si128(g_clamped), _mm256_extracti128_si256(g_clamped, 1));
+        const __m128i r16 = _mm_packus_epi32(
+            _mm256_castsi256_si128(r_clamped), _mm256_extracti128_si256(r_clamped, 1));
+        const __m128i b8 = _mm_packus_epi16(b16, b16);
+        const __m128i g8 = _mm_packus_epi16(g16, g16);
+        const __m128i r8 = _mm_packus_epi16(r16, r16);
+
+        uint8_t b_bytes[8];
+        uint8_t g_bytes[8];
+        uint8_t r_bytes[8];
+        _mm_storel_epi64((__m128i*)b_bytes, b8);
+        _mm_storel_epi64((__m128i*)g_bytes, g8);
+        _mm_storel_epi64((__m128i*)r_bytes, r8);
+
+        for (int i = 0; i < 8; i++) {
+            dst_row[0] = b_bytes[i];
+            dst_row[1] = g_bytes[i];
+            dst_row[2] = r_bytes[i];
+            dst_row += 3;
+        }
+    }
+
+    return x;
+}
+#else
+static int decoder_can_use_vuyx_avx2(void) {
+    return 0;
+}
+#endif
+
+static int decoder_fast_convert_vuyx_to_bgr24(const DecodedFrame* src,
+                                              const StreamInfo* info,
+                                              DecodedFrame* dst) {
+    if (!src || !dst || !src->data[0] || src->width <= 0 || src->height <= 0 ||
+        src->linesize[0] < src->width * 4) {
+        return -1;
+    }
+
+    VuyxBgrCoeffs coeffs;
+    vuyx_bgr_coeffs_from_info(info, &coeffs);
+
+    dst->width = src->width;
+    dst->height = src->height;
+    dst->format = DECODE_FMT_BGR24;
+    dst->storage = DECODE_STORAGE_CPU;
+    dst->pts = src->pts;
+    dst->key_frame = src->key_frame;
+    dst->av_frame = NULL;
+    dst->_decoder_ctx = NULL;
+    memset(dst->data, 0, sizeof(dst->data));
+    memset(dst->linesize, 0, sizeof(dst->linesize));
+    dst->linesize[0] = src->width * 3;
+    dst->data[0] = malloc((size_t)dst->linesize[0] * (size_t)src->height);
+    if (!dst->data[0]) {
+        return -1;
+    }
+
+    for (int y = 0; y < src->height; y++) {
+        const uint8_t* src_row = src->data[0] + (size_t)y * (size_t)src->linesize[0];
+        uint8_t* dst_row = dst->data[0] + (size_t)y * (size_t)dst->linesize[0];
+        int x = 0;
+
+        if (decoder_can_use_vuyx_avx2()) {
+            x = decoder_fast_convert_vuyx_to_bgr24_row_avx2(src_row, dst_row,
+                                                            src->width, &coeffs);
+            src_row += (size_t)x * 4u;
+            dst_row += (size_t)x * 3u;
+        }
+
+        for (; x < src->width; x++) {
+            const int v = src_row[0];
+            const int u = src_row[1];
+            int y_sample = src_row[2] - coeffs.y_offset;
+            const int du = u - 128;
+            const int dv = v - 128;
+
+            if (y_sample < 0) {
+                y_sample = 0;
+            }
+
+            const int y_term = coeffs.y_mul * y_sample;
+            const int b = (y_term + coeffs.bu_mul * du + 128) >> 8;
+            const int g = (y_term - coeffs.gu_mul * du - coeffs.gv_mul * dv + 128) >> 8;
+            const int r = (y_term + coeffs.vr_mul * dv + 128) >> 8;
+
+            dst_row[0] = clamp_u8_from_int(b);
+            dst_row[1] = clamp_u8_from_int(g);
+            dst_row[2] = clamp_u8_from_int(r);
+
+            src_row += 4;
+            dst_row += 3;
+        }
+    }
+
+    return 0;
+}
+
 static int decoder_fast_convert_to_bgr24(const DecodedFrame* src,
                                          const StreamInfo* info,
                                          DecodedFrame* dst) {
     if (!src || !dst || !src->data[0] || src->width <= 0 || src->height <= 0) {
         return -1;
+    }
+
+    if (src->format == DECODE_FMT_VUYX) {
+        return decoder_fast_convert_vuyx_to_bgr24(src, info, dst);
     }
 
     const struct YuvConstants* yuv_constants = bgr_yuv_constants_from_info(info);
@@ -1306,7 +1647,9 @@ static int decoder_convert_with_sws(DecoderCtx* ctx, const DecodedFrame* src,
     enum AVPixelFormat src_pix_fmt = av_format_from_decode(src->format);
     enum AVPixelFormat dst_pix_fmt = av_format_from_decode(target_format);
     const int bytes_per_pixel = decode_format_bytes_per_pixel(target_format);
-    struct SwsContext* sws_ctx = ctx ? ctx->sws_ctx : NULL;
+    int uses_tls_cache = 0;
+    struct SwsContext* sws_ctx = decoder_get_cached_sws_ctx(ctx, &uses_tls_cache);
+    const int free_after_use = (!ctx && !uses_tls_cache);
 
     if (src_pix_fmt == AV_PIX_FMT_NONE || dst_pix_fmt == AV_PIX_FMT_NONE || bytes_per_pixel <= 0) {
         return -1;
@@ -1320,9 +1663,7 @@ static int decoder_convert_with_sws(DecoderCtx* ctx, const DecodedFrame* src,
     if (!sws_ctx) {
         return -1;
     }
-    if (ctx) {
-        ctx->sws_ctx = sws_ctx;
-    }
+    decoder_store_cached_sws_ctx(ctx, sws_ctx, uses_tls_cache);
 
     int coeffs = SWS_CS_ITU709;
     int src_range = 0;
@@ -1332,7 +1673,7 @@ static int decoder_convert_with_sws(DecoderCtx* ctx, const DecodedFrame* src,
             sws_getCoefficients(coeffs), src_range,
             sws_getCoefficients(coeffs), 1,
             0, 1 << 16, 1 << 16) < 0) {
-        if (!ctx) {
+        if (free_after_use) {
             sws_freeContext(sws_ctx);
         }
         return -1;
@@ -1351,7 +1692,7 @@ static int decoder_convert_with_sws(DecoderCtx* ctx, const DecodedFrame* src,
     dst->linesize[0] = src->width * bytes_per_pixel;
     dst->data[0] = malloc((size_t)dst->linesize[0] * (size_t)src->height);
     if (!dst->data[0]) {
-        if (!ctx) {
+        if (free_after_use) {
             sws_freeContext(sws_ctx);
         }
         return -1;
@@ -1374,7 +1715,7 @@ static int decoder_convert_with_sws(DecoderCtx* ctx, const DecodedFrame* src,
 
     const int scaled = sws_scale(sws_ctx, src_data, src_linesize, 0, src->height,
                                  dst_data, dst_linesize);
-    if (!ctx) {
+    if (free_after_use) {
         sws_freeContext(sws_ctx);
     }
     if (scaled <= 0) {
@@ -1408,20 +1749,38 @@ int decoder_convert_format_with_info(DecoderCtx* ctx, const DecodedFrame* src,
         return -1;
     }
 
+    if (target_format == DECODE_FMT_BGR24) {
+        record_bgr24_request();
+    }
+
     memset(dst, 0, sizeof(*dst));
 
 #ifdef HAVE_LIBYUV
-    if (target_format == DECODE_FMT_BGR24 &&
-        decoder_fast_convert_to_bgr24(conv_src, info, dst) == 0) {
-        decoder_free_frame(materialized);
-        return 0;
+    if (target_format == DECODE_FMT_BGR24) {
+        struct timespec convert_start, convert_end;
+        clock_gettime(CLOCK_MONOTONIC, &convert_start);
+        if (decoder_fast_convert_to_bgr24(conv_src, info, dst) == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &convert_end);
+            record_convert_path_time(
+                conv_src->format == DECODE_FMT_VUYX
+                    ? DECODER_CONVERT_PATH_VUYX_BGR24
+                    : DECODER_CONVERT_PATH_LIBYUV_BGR24,
+                elapsed_ms_since(&convert_start, &convert_end));
+            decoder_free_frame(materialized);
+            return 0;
+        }
     }
 #endif
 
+    struct timespec convert_start, convert_end;
+    clock_gettime(CLOCK_MONOTONIC, &convert_start);
     if (decoder_convert_with_sws(ctx, conv_src, info, dst, target_format) != 0) {
         decoder_free_frame(materialized);
         return -1;
     }
+    clock_gettime(CLOCK_MONOTONIC, &convert_end);
+    record_convert_path_time(DECODER_CONVERT_PATH_SWSCALE,
+                             elapsed_ms_since(&convert_start, &convert_end));
 
     decoder_free_frame(materialized);
     return 0;
@@ -1436,6 +1795,36 @@ void decoder_get_stats(DecoderCtx* ctx, DecoderStats* stats) {
     if (!ctx || !stats) return;
     memcpy(stats, &ctx->stats, sizeof(*stats));
     snapshot_hw_transfer_stats(ctx->transfer_stats, stats);
+}
+
+void decoder_get_convert_stats(DecoderConvertStats* stats) {
+    if (!stats) {
+        return;
+    }
+
+    memset(stats, 0, sizeof(*stats));
+
+    pthread_mutex_lock(&g_convert_stats.lock);
+    stats->bgr24_request_count = g_convert_stats.bgr24_request_count;
+    stats->libyuv_bgr24_count = g_convert_stats.libyuv_bgr24_count;
+    if (g_convert_stats.libyuv_bgr24_count > 0) {
+        stats->avg_libyuv_bgr24_time_ms =
+            g_convert_stats.total_libyuv_bgr24_time_ms /
+            (double)g_convert_stats.libyuv_bgr24_count;
+    }
+    stats->vuyx_bgr24_count = g_convert_stats.vuyx_bgr24_count;
+    if (g_convert_stats.vuyx_bgr24_count > 0) {
+        stats->avg_vuyx_bgr24_time_ms =
+            g_convert_stats.total_vuyx_bgr24_time_ms /
+            (double)g_convert_stats.vuyx_bgr24_count;
+    }
+    stats->swscale_count = g_convert_stats.swscale_count;
+    if (g_convert_stats.swscale_count > 0) {
+        stats->avg_swscale_time_ms =
+            g_convert_stats.total_swscale_time_ms /
+            (double)g_convert_stats.swscale_count;
+    }
+    pthread_mutex_unlock(&g_convert_stats.lock);
 }
 
 int decoder_get_nvidia_stats(int device_id, GPUStats* stats) {

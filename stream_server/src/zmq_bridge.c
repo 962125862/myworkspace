@@ -290,6 +290,7 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
     DecodedFrame converted = {0};
     StreamInfo info_snapshot;
     uint16_t stream_id = 0;
+    DecodeFormat source_format = DECODE_FMT_NONE;
 
     pthread_mutex_lock(&stream->lock);
     DecodedFrame* lf = stream->last_frame;
@@ -301,6 +302,7 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
     if (snapshot) {
         info_snapshot = stream->info;
         stream_id = stream->stream_id;
+        source_format = snapshot->format;
     }
     pthread_mutex_unlock(&stream->lock);
 
@@ -340,7 +342,7 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
     frame->mono_ns = monotonic_ns();
     frame->color_space = info_snapshot.color_space;
     frame->color_range = info_snapshot.color_range;
-    frame->source_format = snapshot->format;
+    frame->source_format = source_format;
     frame->bgr_sz = (size_t)converted.linesize[0] * (size_t)converted.height;
     frame->bgr = converted.data[0];
     atomic_init(&frame->refcount, 1u);

@@ -345,6 +345,18 @@ void stream_manager_print_stats(StreamManager* mgr) {
     }
     
     pthread_mutex_unlock(&mgr->lock);
+
+    DecoderConvertStats convert_stats;
+    decoder_get_convert_stats(&convert_stats);
+    printf("[Convert] BGR24 req=%lu, libyuv=%lu avg=%.3f ms, "
+           "vuyx_fast=%lu avg=%.3f ms, swscale=%lu avg=%.3f ms\n",
+           convert_stats.bgr24_request_count,
+           convert_stats.libyuv_bgr24_count,
+           convert_stats.avg_libyuv_bgr24_time_ms,
+           convert_stats.vuyx_bgr24_count,
+           convert_stats.avg_vuyx_bgr24_time_ms,
+           convert_stats.swscale_count,
+           convert_stats.avg_swscale_time_ms);
     
     printf("=======================================\n\n");
 }

@@ -52,6 +52,29 @@ typedef struct {
 static TestContext g_test = {0};
 static volatile int g_stop = 0;
 
+static int parse_backend(const char* text, DecodeBackend* out) {
+    if (!text || !out) {
+        return -1;
+    }
+    if (strcasecmp(text, "intel") == 0 || strcasecmp(text, "vaapi") == 0) {
+        *out = DECODE_BACKEND_INTEL_VA;
+        return 0;
+    }
+    if (strcasecmp(text, "nvidia") == 0 || strcasecmp(text, "cuda") == 0) {
+        *out = DECODE_BACKEND_NVIDIA;
+        return 0;
+    }
+    if (strcasecmp(text, "cpu") == 0) {
+        *out = DECODE_BACKEND_CPU;
+        return 0;
+    }
+    if (strcasecmp(text, "auto") == 0) {
+        *out = DECODE_BACKEND_AUTO;
+        return 0;
+    }
+    return -1;
+}
+
 static void signal_handler(int sig) {
     printf("\n[TEST] Received signal %d, stopping...\n", sig);
     g_stop = 1;
@@ -349,8 +372,14 @@ int main(int argc, char* argv[]) {
     printf("  20路硬件解码压力测试工具\n");
     printf("========================================\n");
     
+    DecodeBackend forced_backend = DECODE_BACKEND_AUTO;
+    int argi = 1;
+    if (argc > 1 && parse_backend(argv[1], &forced_backend) == 0) {
+        argi = 2;
+    }
+
     /* 检查视频文件 */
-    const char* video_file = (argc > 1) ? argv[1] : "test_optimized.h264";
+    const char* video_file = (argc > argi) ? argv[argi] : "test_optimized.h264";
     
     if (access(video_file, F_OK) != 0) {
         /* 尝试其他路径 */
@@ -363,22 +392,33 @@ int main(int argc, char* argv[]) {
     }
     
     printf("视频文件: %s\n\n", video_file);
+    if (forced_backend != DECODE_BACKEND_AUTO) {
+        printf("强制后端: %s\n\n", decoder_backend_name(forced_backend));
+    }
     
     /* 检测可用后端 */
     DecodeBackend detected = decoder_detect_backend();
     printf("检测到的硬件: %s\n\n", decoder_backend_name(detected));
     
     /* 测试 NVIDIA NVDEC */
-    if (detected == DECODE_BACKEND_NVIDIA || detected == DECODE_BACKEND_AUTO) {
+    if (forced_backend == DECODE_BACKEND_NVIDIA ||
+        (forced_backend == DECODE_BACKEND_AUTO &&
+         (detected == DECODE_BACKEND_NVIDIA || detected == DECODE_BACKEND_AUTO))) {
         run_test(DECODE_BACKEND_NVIDIA, "NVIDIA NVDEC", video_file, MAX_TEST_STREAMS);
         sleep(2);
     }
     
     /* 测试 Intel VA-API */
-    if (detected == DECODE_BACKEND_INTEL_VA || detected == DECODE_BACKEND_AUTO) {
+    if (forced_backend == DECODE_BACKEND_INTEL_VA ||
+        (forced_backend == DECODE_BACKEND_AUTO &&
+         (detected == DECODE_BACKEND_INTEL_VA || detected == DECODE_BACKEND_AUTO))) {
         run_test(DECODE_BACKEND_INTEL_VA, "Intel VA-API", video_file, MAX_TEST_STREAMS);
     }
-    
+
+    if (forced_backend == DECODE_BACKEND_CPU) {
+        run_test(DECODE_BACKEND_CPU, "CPU", video_file, MAX_TEST_STREAMS);
+    }
+
     printf("\n[TEST] 所有测试完成\n");
     return 0;
 }

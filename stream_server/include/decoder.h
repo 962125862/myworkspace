@@ -205,6 +205,19 @@ typedef struct {
 
 void decoder_get_stats(DecoderCtx* ctx, DecoderStats* stats);
 
+/** 全局像素格式转换路径统计（进程级累积） */
+typedef struct {
+    uint64_t bgr24_request_count;        /* 请求转成 BGR24 的总次数 */
+    uint64_t libyuv_bgr24_count;         /* 命中 NV12/YUV420P/YUV444P libyuv 快路径次数 */
+    double avg_libyuv_bgr24_time_ms;     /* libyuv 快路径平均耗时 */
+    uint64_t vuyx_bgr24_count;           /* 命中 VUYX 专用快路径次数 */
+    double avg_vuyx_bgr24_time_ms;       /* VUYX 专用快路径平均耗时 */
+    uint64_t swscale_count;              /* 回退到 swscale 的次数 */
+    double avg_swscale_time_ms;          /* swscale 平均耗时 */
+} DecoderConvertStats;
+
+void decoder_get_convert_stats(DecoderConvertStats* stats);
+
 /** GPU 硬件状态信息 */
 typedef struct {
     bool available;              /* 信息是否有效 */
