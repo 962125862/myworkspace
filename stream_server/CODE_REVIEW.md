@@ -1,5 +1,12 @@
 # Code Review 记录
 
+状态说明：
+
+- 本文是一次 `stream_server` 代码审查与修复记录，主要用于保留历史问题和修复依据
+- 文中的 bug 修复项已经合入
+- 文末 `60 fps` 表格是历史解码吞吐测试，不等同于当前线上 `GET_LATEST_BGR / IPC BGR` 路径
+- 当前稳定版的线上 benchmark 结论以 `deploy/BENCHMARK_stream_server_2026-04-13.md` 为准
+
 ## CR 概要
 
 | 项目 | 数量 |

@@ -18,6 +18,7 @@ Docker / Sunshine
 - 推流端口：`9000/tcp`
 - ZMQ TCP：`tcp://0.0.0.0:5566`
 - ZMQ IPC：`ipc:///tmp/stream_server_bgr.sock`
+- 当前 Intel 栈：`i915 + Intel iHD 24.1.0`
 - 启动命令保持不变，只要启用了 `--zmq-bridge-bind`，就会自动带出默认 IPC
 
 当前正式链路的默认行为：
@@ -26,7 +27,9 @@ Docker / Sunshine
 - `stream_server` 在 `auto` 模式下对 `HEVC444` 优先走 Intel VA-API
 - `GET_LATEST_BGR` 统一走解码后适配层，不再由 `zmq_bridge` 自己维护多套源格式分支
 - 常见快路径优先走 `libyuv`
-- `VUYX -> BGR24` 等当前无专门快路径的格式回退到 `swscale`
+- 本机 `HEVC444 + Intel` 下载到 CPU 后当前通常落到 `VUYX`
+- `VUYX -> BGR24` 现在已有专门快路径，并带 x86 SIMD 分发
+- `STREAM_DEFER_HW_DOWNLOAD=on` 仍保持为默认值，取图时才做 `GPU -> CPU` 下载
 
 ## 已完成
 
@@ -42,6 +45,9 @@ Docker / Sunshine
 - `zmq_bridge` 统一请求 `BGR24`
 - `NV12/YUV420P/YUV444P/VUYX` 已纳入统一转换入口
 - Intel `HEVC444` 实测可走到 `VUYX -> BGR24`
+- `VUYX -> BGR24` 已切到专门快路径，不再走 `swscale`
+- `ctx == NULL` 的 `swscale` 调用已改成复用缓存的 `SwsContext`
+- `GET_LATEST_BGR` 路径上的一个 UAF 已修复
 
 ### 3. ZMQ bridge 工程化改造
 
@@ -63,18 +69,32 @@ Docker / Sunshine
 
 正式 `stream_server` 上，`1024x768 HEVC444` 的当前结果：
 
-- 20 路同时解码稳定
-- 20 路同时 `BGR24` 取图，`5 FPS/路`
-  - `stream_server` 进程平均 CPU 约 `72%`
-  - 相对空载大约多吃 `0.47` 个逻辑核
-- 20 路同时 `BGR24` 取图，`10 FPS/路`
-  - `stream_server` 进程平均 CPU 约 `113%`
-  - 相对空载大约多吃 `0.88` 个逻辑核
+- 20 路真实流同时解码稳定
+- 不持续取图时：
+  - 平均每路 `31.5 fps`
+  - 平均 `Dec` 约 `0.348 ms/frame`
+  - `stream_server` 进程平均 CPU 约 `25.8%`
+  - `stream_server` 进程平均 RSS 约 `448.9 MB`
+- 20 路 `IPC + GET_LATEST_BGR`，目标 `30 fps/路` 时：
+  - `Intel`：总吞吐 `343.43 fps`，约 `17.17 fps/路`
+    - `Dec 0.303 ms`
+    - `Xfer 2.011 ms`
+    - `Convert 0.885 ms`
+    - 进程平均 CPU `134.8%`
+    - 进程平均 RSS `534.7 MB`
+  - `NVIDIA`：总吞吐 `595.53 fps`，约 `29.78 fps/路`
+    - `Dec 1.551 ms`
+    - `Xfer 0.906 ms`
+    - `Convert 0.624 ms`
+    - 进程平均 CPU `140.6%`
+    - 进程平均 RSS `916.1 MB`
+    - GPU 显存平均约 `4460 MB`
 
 结论：
 
-- 当前正式场景没有阻塞使用的问题
-- 按 `5 FPS/路` 的取图模式，CPU 成本是可接受的
+- 当前正式业务频率下没有阻塞使用的问题
+- Intel 这条路的瓶颈已经不是解码本身，而是 `Xfer + Convert`
+- 如需看完整口径和对比说明，直接参考 `deploy/BENCHMARK_stream_server_2026-04-13.md`
 
 ## 当前已知问题 / 风险
 
@@ -108,74 +128,57 @@ Docker / Sunshine
 ### 3. Intel 路径的跨机器可移植性仍需保守看待
 
 - 本机 `192.168.11.31` 上，Intel `HEVC444` 已验证可用
-- 但 Intel 下载到 CPU 后的像素格式、驱动行为、FFmpeg/VAAPI 组合，在其它 Ubuntu 主机上不保证完全一致
+- 当前本机实际栈是 `i915 + Intel iHD 24.1.0 + FFmpeg/VAAPI`
+- Intel 下载到 CPU 后的像素格式、驱动行为、FFmpeg/VAAPI 组合，在其它 Ubuntu 主机上不保证完全一致
 
 影响：
 
 - 现在可以说“本机可用”
 - 还不能直接外推为“所有 Intel Ubuntu 主机都可无差别运行”
 
-### 4. 高并发取图场景仍有明显 CPU 增量
+### 4. Intel 高并发取图仍受 `Xfer` 和单线程 bridge 限制
 
-- `20 x 5 FPS` 取 `BGR24`：`stream_server` 平均约 `72% CPU`
-- `20 x 10 FPS` 取 `BGR24`：`stream_server` 平均约 `113% CPU`
+- 在 `STREAM_DEFER_HW_DOWNLOAD=on` 下，`GET_LATEST_BGR` 的关键成本是：
+  - `av_hwframe_transfer_data()`
+  - CPU 上转 `BGR24`
+- 当前 `ZMQ` bridge 仍是单个 `ROUTER` 线程串行处理请求
+- 本机 20 路 `30 fps/路` 的实测里：
+  - `Intel` 约 `2.896 ms/request`（`Xfer + Convert`）
+  - `NVIDIA` 约 `1.530 ms/request`
 
 影响：
 
-- 当前业务频率内没有问题
-- 如果后续同时提升：
-  - 路数
-  - 分辨率
-  - 单路取图频率
-  需要重新压测
+- 当前实际业务频率内没有问题
+- 如果目标变成“20 路持续接近 30 fps 的 `BGR24` 拉取”，当前 Intel 路线不占优
 
-### 5. 文档维护需要跟上正式状态
+### 5. bridge 并发化实验未进入正式版本
+
+- 已做过一版 worker 化 bridge 实验
+- 20 路 `30 fps/路` 的 Intel 场景下，吞吐从约 `17.17 fps/路` 提到约 `20.40 fps/路`
+- 但 `stream_server` 进程 CPU 也从约 `134.8%` 抬到了约 `259%`
+
+影响：
+
+- 这条路当前不符合“保留 CPU 余量给其他生产业务”的约束
+- 因此没有进入正式版本
+
+### 6. 文档维护需要跟上正式状态
 
 - 旧版 `PROGRESS.md` 曾长期停留在 `H.264/NVDEC/30fps` 结论
 - 当前主链路已经切到 `HEVC444 + Intel-first + tcp/ipc 双 ZMQ`
+- 当前 `VUYX -> BGR24` 也已经不是 `swscale fallback`
 
 影响：
 
 - 后续功能改动如果不及时回写状态文档，会再次产生认知漂移
 
-## 其他未合入的本地修改
-
-截至本文档更新时，本地还有两处未合入改动：
-
-### 1. `deploy/agent_stack_runtime/README.md`
-
-内容：
-
-- 新增一个直接在 `192.168.11.31` 上把 `worker_s21` 改成 `2560x1440` 并立即重启的示例命令
-
-判断：
-
-- 这是有用的运行示例
-- 可以合入
-
-### 2. `python_dir/input_client.py`
-
-内容：
-
-- `__main__` 里的 demo 默认控制端口从 `50002` 改成了 `50001`
-
-判断：
-
-- `WorkerInputClient.__init__()` 本身默认端口就是 `50001`
-- 项目其它文档和控制端口约定也都是 `stream 1 -> 50001`
-- 这更像是把 demo 入口和项目默认约定对齐
-- 可以合入
-
 ## 建议的下一步
 
-1. 把部署流程收成脚本化版本
-2. 给正式部署增加标准化回滚方式
-3. 如需扩容，再补：
-   - 更高路数
-   - 更高分辨率
-   - Intel / NVIDIA 的同口径对比压测
+1. 把部署流程收成可回滚的脚本化版本
+2. 如果后续 `BGR24` 拉取频率继续上升，优先评估 `NVIDIA` 或减少 CPU `BGR24` 需求
+3. 如果要继续研究 Intel，再做非正式环境的 `FFmpeg + intel-media-va-driver` A/B 测试
 
 ---
 
-Doc-Version: 0.2.0
-Repo-Rev: 2841723+
+Doc-Version: 0.3.0
+Repo-Rev: 0dcf925

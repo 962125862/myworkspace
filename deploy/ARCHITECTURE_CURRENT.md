@@ -39,6 +39,7 @@
 - 维护每路 `last_frame`
 - 硬解默认保留 `last_frame` 的硬件帧引用，不立即下载到 CPU
 - 通过内置 ZMQ bridge 输出 `BGR24`
+- 当前 bridge 为单个 `ROUTER` 线程，请求路径串行执行 `hwdownload + convert + reply`
 
 ### 1.4 strem_agent_server
 
@@ -154,8 +155,9 @@ strem_agent_client
 - 之后统一走 `decoder_convert_format_with_info(..., DECODE_FMT_BGR24)`
 - 已知快路径：
   - `NV12/YUV420P/YUV444P -> BGR24` 走 `libyuv`
+  - `VUYX -> BGR24` 走专门快路径；x86 主机上带运行时 SIMD 分发
 - 兜底路径：
-  - `VUYX` 等没有专门快路径的 CPU 格式，回退到 `FFmpeg swscale`
+  - 其它当前支持但没有专门快路径的 CPU 格式，回退到 `FFmpeg swscale`
 - `libyuv` 和 `swscale` 都使用 `STREAM_START` 透传下来的 `color_space/color_range`
 
 ## 5. ZMQ 架构
@@ -168,6 +170,7 @@ strem_agent_client
 - 从 `last_frame` 按需生成 `BGR24`
 - 默认不会在每帧 decode 后立刻做 `GPU -> CPU` 下载
 - 多个客户端统一走同一个 ZMQ 入口
+- 当前 bridge 线程模型仍是“单个 `ROUTER` 线程 + 每帧 BGR cache”
 
 协议：
 
@@ -193,6 +196,21 @@ strem_agent_client
 - 运行时实际路数优先通过 `--max-streams <N>` 或 `STREAM_MAX_STREAMS=<N>` 调整
 - 不需要再为了 `20 -> 35 -> 48` 这种扩容反复改代码重编
 - `-c/--connections` 只控制 TCP 连接数，建议略高于 `max-streams`，给重连抖动留余量
+
+### 5.3 当前主机上的实际格式路径
+
+- `192.168.11.31` 的 Intel 栈当前是 `i915 + Intel iHD 24.1.0`
+- 当前主机上 `HEVC444 + Intel` 下载到 CPU 后常见落地格式是 `VUYX`
+- 当前主机上 `HEVC444 + NVIDIA` 下载到 CPU 后常见落地格式是 `YUV444P`
+- 这也是为什么 `Intel` 和 `NVIDIA` 在 `GET_LATEST_BGR` 的 `Xfer + Convert` 成本上差异明显
+
+### 5.4 当前性能边界
+
+- 在 `STREAM_DEFER_HW_DOWNLOAD=on` 下，`GET_LATEST_BGR` 的吞吐上限主要受 `Xfer + Convert` 影响
+- `192.168.11.31` 的 20 路真实流、`30 fps/路` IPC BGR benchmark 里：
+  - `Intel` 约 `17.17 fps/路`
+  - `NVIDIA` 约 `29.78 fps/路`
+- 这部分结论以 `deploy/BENCHMARK_stream_server_2026-04-13.md` 为准
 
 ## 6. 自动恢复
 

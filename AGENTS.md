@@ -2,7 +2,7 @@
 
 This repo contains three main components:
 
-- `ml_worker` (root `src/`): Moonlight/Limelight client that receives encoded H.264 and forwards it downstream via TCP (TLV).
+- `ml_worker` (root `src/`): Moonlight/Limelight client that receives encoded video and forwards it downstream via TCP (TLV).
 - `strem_agent_server/` + `strem_agent_client/`: remote agent (video proxy + keyboard/mouse control).
 - `stream_server/`: multi-stream TLV receiver + stats + optional decode/shm/bridge.
 
@@ -11,10 +11,11 @@ Primary runbooks live in `deploy/` (see below). Prefer following those docs over
 ## Key Docs
 
 - Remote agent quickstart: `deploy/RUNBOOK_strem_agent.md`
-- `stream_server` services: `deploy/SERVICES_RUNBOOK.md`
-- `stream_server` + shm/zmq: `deploy/RUNBOOK_stream_server_zmq.md`
-- Environment variables reference: `deploy/ENV_REFERENCE.md`
-- Architecture diagrams/flow: `deploy/ARCHITECTURE_FLOW.md`
+- Main `ml_worker -> stream_server` chain: `deploy/CHAIN_ml_worker_stream_server.md`
+- Current architecture: `deploy/ARCHITECTURE_CURRENT.md`
+- Current CLI/runtime flags: `deploy/CLI_REFERENCE_CURRENT.md`
+- Current build/deploy commands: `deploy/BUILD_DEPLOY_COMMANDS_CURRENT.md`
+- Current benchmark note: `deploy/BENCHMARK_stream_server_2026-04-13.md`
 - Current project status/issues: `PROGRESS.md`
 
 ## Build (CMake)
@@ -50,4 +51,3 @@ Notes:
 - Prefer small, surgical changes with a clear reproduction + verification path.
 - Avoid committing large binary artifacts (e.g. `.h264` samples) unless explicitly requested; re-use existing `test_stream.h264` / `test_optimized.h264` for local testing.
 - Keep documentation version markers (e.g. `Doc-Version`, `Repo-Rev`) consistent with existing docs when editing runbooks.
-

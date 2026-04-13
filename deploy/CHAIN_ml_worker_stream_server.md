@@ -89,6 +89,7 @@ color_range
 - 解码后只保留每路 `last_frame`
 - 默认优先保留硬件帧引用，不在每帧 decode 后立刻下载
 - 在收到 ZMQ 请求时，如果 `last_frame` 还在 GPU 上，则先按需下载到 CPU，再通过统一像素格式适配层转成 `BGR24`
+- 当前 bridge 仍是单个 `ROUTER` 线程；对同一帧的重复请求会命中最近一次 `BGR24` cache
 
 ## 5. 解码路由与回退顺序
 
@@ -142,8 +143,9 @@ color_range
     - `NV12 -> BGR24` 走 `libyuv`
     - `YUV420P -> BGR24` 走 `libyuv`
     - `YUV444P -> BGR24` 走 `libyuv`
+    - `VUYX -> BGR24` 走专门快路径；x86 主机上带运行时 SIMD 分发
   - 兜底路径：
-    - `VUYX -> BGR24` 以及其它当前支持但没有专门快路径的格式，回退到 `FFmpeg swscale`
+    - 其它当前支持但没有专门快路径的格式，回退到 `FFmpeg swscale`
 
 返回 multipart：
 
@@ -209,4 +211,13 @@ color_range
 - 分辨率：`1024x768`
 - 色彩：`BT.709 + full`
 - 解码：`Intel VA-API`
+- 下载到 CPU 后的常见格式：`VUYX`
 - 输出：ZMQ `BGR24`
+
+补充说明：
+
+- `192.168.11.31` 上的 `20` 路真实流、`30 fps/路` IPC BGR benchmark 里：
+  - `Intel` 约 `17.17 fps/路`
+  - `NVIDIA` 约 `29.78 fps/路`
+- 这不是解码器本身差异，而是 `STREAM_DEFER_HW_DOWNLOAD=on` 下 `Xfer + Convert` 在单线程 bridge 中的差异
+- 具体数字见 `deploy/BENCHMARK_stream_server_2026-04-13.md`

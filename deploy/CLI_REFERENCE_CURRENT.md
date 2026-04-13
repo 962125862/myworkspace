@@ -136,12 +136,13 @@
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
+```
 
 默认同时监听：
 
 - `tcp://0.0.0.0:5566`
 - `ipc:///tmp/stream_server_bgr.sock`
-```
+- 当前主机 `192.168.11.31` 上，`HEVC444 + intel` 下载到 CPU 后通常落到 `VUYX`，再走专门的 `VUYX -> BGR24` 快路径
 
 ### 2.2 启动环境变量
 
@@ -163,6 +164,7 @@
 - 编译期硬上限已经放宽到 `256`
 - 以后 `20 -> 35 -> 48` 这类扩容，优先改启动参数，不需要每次改代码重编
 - 如果要超过 `256`，才需要再次改代码
+
 和硬解保帧逻辑相关的环境变量是：
 
 - `STREAM_DEFER_HW_DOWNLOAD`
@@ -175,6 +177,7 @@
 
 - 如果你不显式设置这两个环境变量，默认就已经按新逻辑运行
 - 如果想恢复旧行为，可以启动前设置 `STREAM_DEFER_HW_DOWNLOAD=off`
+- 当前 20 路真实流、`30 fps/路` 的 `IPC BGR` benchmark 结果，直接参考 `deploy/BENCHMARK_stream_server_2026-04-13.md`
 
 ### 2.3 当前主链路真正使用的参数
 
@@ -275,3 +278,9 @@
 - `CHROMA="444"`
 - `BITDEPTH="8"`
 - `SKIP_MODE_CHECK="1"`
+
+## 5. 相关文档
+
+- 链路说明：`deploy/CHAIN_ml_worker_stream_server.md`
+- 架构说明：`deploy/ARCHITECTURE_CURRENT.md`
+- benchmark：`deploy/BENCHMARK_stream_server_2026-04-13.md`

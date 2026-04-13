@@ -93,7 +93,26 @@ cd /home/gejun/work/my_ml_work
 
 ## 4. 当前直接运行命令
 
-### 4.1 在 192.168.11.31 上启动 stream_server
+### 4.1 查看 192.168.11.31 上的正式 stream_server 服务
+
+```bash
+ssh 192.168.11.31 'systemctl cat stream_server_9000.service'
+ssh 192.168.11.31 'systemctl show -p MainPID,SubState,ExecMainStartTimestamp stream_server_9000.service'
+```
+
+### 4.2 在 192.168.11.31 上重编并替换 `stream_server`
+
+```bash
+ssh 192.168.11.31 'cd /home/gejun/work/my_ml_work/stream_server && cmake --build build -j --target stream_server'
+ssh 192.168.11.31 'pid=$(systemctl show -p MainPID --value stream_server_9000.service); kill -TERM "$pid"'
+```
+
+说明：
+
+- 当前正式服务启用了 `Restart=always`
+- 普通用户没有 `systemctl restart` 权限时，可用上面的 `SIGTERM` 方式让 systemd 自动拉起新进程
+
+### 4.3 在 192.168.11.31 上前台启动等价命令
 
 ```bash
 cd /home/gejun/work/my_ml_work/stream_server
@@ -105,12 +124,12 @@ cd /home/gejun/work/my_ml_work/stream_server
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
+```
 
 默认同时监听：
 
 - `tcp://0.0.0.0:5566`
 - `ipc:///tmp/stream_server_bgr.sock`
-```
 
 当前这条启动命令默认已经启用新逻辑，不需要额外加 CLI：
 
@@ -135,8 +154,8 @@ cd /home/gejun/work/my_ml_work/stream_server
 
 ```ini
 Environment=STREAM_MAX_STREAMS=20
-Environment=STREAM_DEFER_HW_DOWNLOAD=off
-Environment=STREAM_NVDEC_EXTRA_HW_FRAMES=8
+Environment=STREAM_DEFER_HW_DOWNLOAD=on
+Environment=STREAM_NVDEC_EXTRA_HW_FRAMES=24
 ```
 
 含义：
@@ -144,16 +163,9 @@ Environment=STREAM_NVDEC_EXTRA_HW_FRAMES=8
 - `STREAM_DEFER_HW_DOWNLOAD=on`：硬解后默认保留 `last_frame` 的硬件帧引用，取图时再下载
 - `STREAM_NVDEC_EXTRA_HW_FRAMES`：给 NVDEC/VAAPI 多留硬件 surface，避免保留 `last_frame` 时帧池被占满
 - `STREAM_MAX_STREAMS`：运行时启用的流槽位数量；扩容时优先改它，而不是改代码重编
+- 如果想恢复旧行为，再单独改成 `STREAM_DEFER_HW_DOWNLOAD=off` 和较小的 `STREAM_NVDEC_EXTRA_HW_FRAMES`
 
-```angular2html
-for f in workers/worker_*.conf; do     ./mlctl.sh up "$(basename "$f" .conf)" 0000;   done
-
-```
-
-
-
-
-### 4.2 在 192.168.11.31 上启动 ml_worker
+### 4.4 在 192.168.11.31 上启动 `ml_worker`
 
 ```bash
 cd /home/gejun/work/my_ml_work
@@ -175,7 +187,7 @@ cd /home/gejun/work/my_ml_work
   --control-port 50001
 ```
 
-## 4.3 当前代理链启动命令
+## 4.5 当前代理链启动命令
 
 如果你使用 `strem_agent_server`，当前推荐仍然走 `H264/420` 场景：
 
@@ -211,25 +223,20 @@ cd /home/gejun/work/my_ml_work
 
 如果是从当前机器同步代码到 `192.168.11.31`：
 
-同步少量改动文件：
+按本次改动列出文件：
 
 ```bash
 printf '%s\n' \
-  deploy/mlctl.sh \
+  README.md \
+  PROGRESS.md \
+  AGENTS.md \
+  deploy/CHAIN_ml_worker_stream_server.md \
+  deploy/ARCHITECTURE_CURRENT.md \
   deploy/CLI_REFERENCE_CURRENT.md \
   deploy/BUILD_DEPLOY_COMMANDS_CURRENT.md \
-  src/main.c \
-  src/tcp_sender.c \
-  src/video_callbacks.c \
-  include/tcp_sender.h \
-  include/video_callbacks.h \
-  stream_server/include/protocol.h \
-  stream_server/include/stream.h \
-  stream_server/include/mlctl_cmd.h \
-  stream_server/src/protocol.c \
-  stream_server/src/server.c \
-  stream_server/src/stream.c \
-  stream_server/src/zmq_bridge.c \
+  deploy/BENCHMARK_stream_server_2026-04-13.md \
+  stream_server/CODE_REVIEW.md \
+  python_dir/zmq_multi_stream_bgr_perf.py \
 | rsync -az --files-from=- /home/gejun/work/my_ml_work/ 192.168.11.31:/home/gejun/work/my_ml_work/
 ```
 
@@ -250,6 +257,19 @@ ssh 192.168.11.31 'ss -lntp | egrep ":(9000|5566)\b"; ss -lunp | egrep ":19000\b
 看日志：
 
 ```bash
-ssh 192.168.11.31 'tail -n 120 /tmp/my_ml_work_stream_server.log'
+ssh 192.168.11.31 'journalctl -u stream_server_9000.service -n 120 --no-pager'
 ssh 192.168.11.31 'tail -n 120 /tmp/ml_worker_170_remote.log'
+```
+
+20 路 IPC BGR benchmark：
+
+```bash
+ssh 192.168.11.31 'source /home/my_server/bin/activate && cd /home/gejun/work/my_ml_work && python python_dir/zmq_multi_stream_bgr_perf.py --addr ipc:///tmp/stream_server_bgr.sock --streams 1-20 --fps 30 --duration-sec 30'
+```
+
+20 路离线硬解 benchmark：
+
+```bash
+ssh 192.168.11.31 'cd /home/gejun/work/my_ml_work/stream_server && ./build/test_20streams_hw intel /home/gejun/work/my_ml_work/test_optimized.h264'
+ssh 192.168.11.31 'cd /home/gejun/work/my_ml_work/stream_server && ./build/test_20streams_hw nvidia /home/gejun/work/my_ml_work/test_optimized.h264'
 ```
