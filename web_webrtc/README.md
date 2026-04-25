@@ -27,7 +27,7 @@ Quick Start
   --in-host 0.0.0.0 --in-port 19000 \\
   --video-bind 0.0.0.0 --video-port 31234 \\
   --ctrl-bind 0.0.0.0 --ctrl-port 31235 \\
-  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 50001
+  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 30001
 ```
 
 2) Start the stack:

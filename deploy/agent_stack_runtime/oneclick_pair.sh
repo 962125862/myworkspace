@@ -14,6 +14,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+CONTROL_PORT_BASE="${ML_CONTROL_PORT_BASE:-30000}"
+
 positional_args=()
 use_local=0
 stream_id=""
@@ -74,7 +76,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --control-port)
       if [[ $# -lt 2 ]]; then
-        echo "[pair][ERR] --control-port 需要一个端口，例如 --control-port 50100" >&2
+        echo "[pair][ERR] --control-port 需要一个端口，例如 --control-port 30100" >&2
         exit 2
       fi
       control_port="${2:-}"
@@ -201,7 +203,7 @@ fi
 
 if [[ -n "$control_port" ]]; then
   if [[ ! "$control_port" =~ ^[0-9]+$ ]]; then
-    echo "[pair][ERR] control_port 必须是数字，例如 50100" >&2
+    echo "[pair][ERR] control_port 必须是数字，例如 30100" >&2
     exit 2
   fi
   if (( 10#$control_port < 1 || 10#$control_port > 65535 )); then
@@ -231,9 +233,9 @@ else
   fi
 fi
 
-# Stable convention: stream 1 -> control 50001, stream 2 -> 50002, ...
+# Stable convention: stream 1 -> control 30001, stream 2 -> 30002, ...
 if [[ -z "$control_port" ]]; then
-  control_port=$((50000 + 10#${stream_id}))
+  control_port=$((CONTROL_PORT_BASE + 10#${stream_id}))
 fi
 
 echo "[pair] worker=$worker stream_id=$stream_id control_port=$control_port sunshine_ip=$sunshine_ip pin=${pin:-'(auto)'}"

@@ -10,7 +10,8 @@
 - agent ingest（接 ml_worker）：`19000/tcp`
 - agent video out（给 client）：`31234/tcp`
 - agent control in（给 client）：`31235/tcp`
-- worker control（ml_worker 监听）：`50001/udp`（仅 server 侧到 worker 侧，不跨公网）
+- worker control（ml_worker 监听）：`30001/udp`（默认单路；多路推荐按 `30000+stream_id` 规划，仅 server 侧到 worker 侧，不跨公网）
+- 如果同机上还有另一套 `stream_id=1` 的 `ml_worker` 已经占用了 `30001`，请显式改成别的低位端口，例如 `30100`，并同步更新 worker 配置和 `--worker-ctrl-port`
 
 ## Late-join（晚加入）与 IDR
 
@@ -44,7 +45,7 @@ ls -l build/strem_agent_server
   --in-host 0.0.0.0 --in-port 19000 \
   --video-bind 0.0.0.0 --video-port 31234 \
   --ctrl-bind 0.0.0.0 --ctrl-port 31235 \
-  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 50001
+  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 30001
 ```
 
 如果需要 token（可选）：
@@ -70,7 +71,7 @@ docker run --rm -it --network host \
   -e IN_HOST=0.0.0.0 -e IN_PORT=19000 \
   -e VIDEO_BIND=0.0.0.0 -e VIDEO_PORT=31234 \
   -e CTRL_BIND=0.0.0.0 -e CTRL_PORT=31235 \
-  -e WORKER_CTRL_IP=127.0.0.1 -e WORKER_CTRL_PORT=50001 \
+  -e WORKER_CTRL_IP=127.0.0.1 -e WORKER_CTRL_PORT=30001 \
   strem-agent-server:latest
 ```
 
@@ -115,7 +116,7 @@ docker compose logs -f --tail 100
 
 如果 agent_server 与 ml_worker 同机：默认 `--control-bind 127.0.0.1` 即可。
 
-如果 agent_server 与 ml_worker 跨机：需要 `--control-bind 0.0.0.0` 并确保 50001/udp 可达。
+如果 agent_server 与 ml_worker 跨机：需要 `--control-bind 0.0.0.0` 并确保对应 `30000+stream_id` 的 UDP 端口可达。
 
 ## 3) Client（Windows/macOS/Linux）
 
@@ -163,7 +164,7 @@ make -C strem_agent_server -j
   --in-host 127.0.0.1 --in-port 19000 \
   --video-bind 127.0.0.1 --video-port 31234 \
   --ctrl-bind 127.0.0.1 --ctrl-port 31235 \
-  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 50001
+  --worker-ctrl-ip 127.0.0.1 --worker-ctrl-port 30001
 ```
 
 ### 5.2 配置 ml_worker 推到本机 agent

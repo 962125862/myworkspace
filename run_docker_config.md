@@ -162,7 +162,7 @@ Main settings:
 - `IN_HOST` / `IN_PORT`: ingest bind for `ml_worker` (default `0.0.0.0:19000`)
 - `VIDEO_BIND` / `VIDEO_PORT`: video out (default `0.0.0.0:31234`)
 - `CTRL_BIND` / `CTRL_PORT`: control in (default `0.0.0.0:31235`)
-- `WORKER_CTRL_IP` / `WORKER_CTRL_PORT`: UDP forward target for control packets (default `127.0.0.1:50001`)
+- `WORKER_CTRL_IP` / `WORKER_CTRL_PORT`: UDP forward target for control packets (default `127.0.0.1:30001`)
 
 Optional tuning (read by the binary itself):
 

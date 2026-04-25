@@ -8,6 +8,7 @@ DATA_DIR="${ML_DATA_DIR:-$BASE_DIR/data}"
 DEFAULT_IMAGE="${ML_IMAGE:-ml-worker:latest}"
 DEFAULT_WORKER_BIN="${ML_BIN:-}"
 DOCKER_USER="${ML_DOCKER_USER:-$(id -u):$(id -g)}"
+CONTROL_PORT_BASE="${ML_CONTROL_PORT_BASE:-30000}"
 
 log() {
     printf '[mlctl] %s\n' "$*"
@@ -118,7 +119,7 @@ write_worker_config() {
 
     # If not specified, auto-assign TCP port / stream_id / control_port.
     # Convention:
-    # - worker_sN -> TCP_PORT=9000, STREAM_ID=N, CONTROL_PORT=50000+N
+    # - worker_sN -> TCP_PORT=9000, STREAM_ID=N, CONTROL_PORT=30000+N
     # - worker_<last_ip_octet> keeps idx-based fallback behavior unless stream_id/control_port are passed in explicitly
     # - other names that end with digits keep the old behavior (idx-based)
     if [[ -z "$tcp_port" ]]; then
@@ -148,13 +149,13 @@ write_worker_config() {
     if [[ -z "$control_port" ]]; then
         if [[ "$name" =~ ^worker_s[0-9]+$ ]]; then
             # Use STREAM_ID so the mapping stays stable even if naming changes.
-            control_port=$((50000 + 10#${stream_id}))
+            control_port=$((CONTROL_PORT_BASE + 10#${stream_id}))
         else
             local idx_str=""
             if [[ "$name" =~ ([0-9]+)$ ]]; then
                 idx_str="${BASH_REMATCH[1]}"
             fi
-            control_port=$((50001 + 10#${idx_str:-0}))
+            control_port=$((CONTROL_PORT_BASE + 1 + 10#${idx_str:-0}))
         fi
     fi
 
@@ -259,7 +260,7 @@ create_worker_interactive() {
     local control_bind
     prompt_with_default control_bind "CONTROL_BIND" "0.0.0.0"
     local control_port
-    prompt_with_default control_port "CONTROL_PORT" "50001"
+    prompt_with_default control_port "CONTROL_PORT" "$((CONTROL_PORT_BASE + 1))"
 
     echo
     log "视频参数配置"
@@ -397,7 +398,7 @@ create_workers_batch() {
 
         create_worker_noninteractive \
             "$name" "$host" "$app" "$image" "$worker_bin" \
-            "$tcp_host" "$tcp_port" "$i" "$control_bind" "$((50000 + i))" \
+            "$tcp_host" "$tcp_port" "$i" "$control_bind" "$((CONTROL_PORT_BASE + i))" \
             "$width" "$height" "$fps" "$bitrate" "$packet_size" \
             "$colorspace" "$range" "$codec" "$chroma" "$bitdepth" "$skip_mode_check" || return 1
         created=$((created + 1))
@@ -477,7 +478,7 @@ create_workers_from_ip_list() {
                 return 1
             }
             name="worker_${suffix}"
-            control_port=$((50000 + idx))
+            control_port=$((CONTROL_PORT_BASE + idx))
 
             if worker_exists "$name"; then
                 err "worker 已存在，停止批量创建: $name"
@@ -553,9 +554,9 @@ load_worker() {
     CONTROL_BIND="${CONTROL_BIND:-0.0.0.0}"
     if [[ -z "${CONTROL_PORT:-}" ]]; then
         if [[ -n "$idx_str" ]]; then
-            CONTROL_PORT=$((50001 + 10#$idx_str))
+            CONTROL_PORT=$((CONTROL_PORT_BASE + 1 + 10#$idx_str))
         else
-            CONTROL_PORT=50001
+            CONTROL_PORT=$((CONTROL_PORT_BASE + 1))
         fi
     fi
 
@@ -1174,7 +1175,7 @@ usage() {
 - 现在不需要你手动创建 worker00.conf
 - 如果 pair/up 时 worker 不存在，会提示你现场创建
 - add 可显式新建 worker
-- batch-add : 批量创建 `worker_sN`，默认共用 `TCP_PORT=9000`，`STREAM_ID=N`，`CONTROL_PORT=50000+N`
+- batch-add : 批量创建 `worker_sN`，默认共用 `TCP_PORT=9000`，`STREAM_ID=N`，`CONTROL_PORT=30000+N`
 - batch-add-ips : 按输入 IP 顺序批量创建，命名规则 `worker_<ip最后一段>`，并自动生成 `deploy/stream_server_ctrl_map.txt`
   - 生成的 ctrl map 可直接给 `stream_server --ml-worker-ctrl-map-file deploy/stream_server_ctrl_map.txt` 使用
 - pair      : 启动一次性 pair 容器，看到 PIN 后去 Sunshine 主机输入

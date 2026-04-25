@@ -49,8 +49,8 @@ sudo ./oneclick_up.sh
 # 或指定 PIN=1234
 ./oneclick_pair.sh <SUNSHINE_IP> --stream-id 1 --pin 1234
 
-# 如果你要手动指定 UDP control 端口
-./oneclick_pair.sh <SUNSHINE_IP> --stream-id 1 --control-port 50100
+# 如果同机上还有另一套 ml_worker 已经占用了 stream 1 的默认控制端口，可显式改到其他低位端口（例如 30100）
+./oneclick_pair.sh <SUNSHINE_IP> --stream-id 1 --control-port 30100
 ```
 
 停止：
@@ -85,7 +85,8 @@ docker exec -it agent_link_service bash -lc '/app/mlctl.sh pair worker_s1 1234'
 
 - `worker_sN.conf` 里配置 `STREAM_ID="N"`（文件名和 STREAM_ID 一致）
 - `TCP_PORT` 推荐固定为 `19000`（推流到 strem_agent_server ingest）
-- `CONTROL_PORT` 推荐为 `50000+STREAM_ID`（例如 stream 1 -> 50001）；如果你在 `worker_sN.conf` 里手写了 `CONTROL_PORT`，`oneclick_pair.sh` 会优先沿用它
+- `CONTROL_PORT` 推荐为 `30000+STREAM_ID`（例如 stream 1 -> 30001）；如果你在 `worker_sN.conf` 里手写了 `CONTROL_PORT`，`oneclick_pair.sh` 会优先沿用它
+- 如果同机上已经有另一套 `stream_id=1` 的 worker 在用 `30001`，请显式改成别的低位专用端口，例如 `30100`
 - 目前 `strem_agent_server` 只接受 `stream_id=1..20`，更大的编号会在配对前直接报错；如果要扩展上限，需要先改 server 端协议限制
 
 ## 串流分辨率/帧率/码率怎么配？

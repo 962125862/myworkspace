@@ -122,7 +122,7 @@
 - `--h264-tap-bind <ip>`：tap 监听地址
 - `--h264-tap-stall-ms <ms>`：tap 堵塞阈值
 - `--h264-tap-drop-idr <0|1>`：tap 恢复策略
-- `--ml-worker-ctrl-map <map>`：按 `stream_id` 路由上游 `REQ_IDR`，格式如 `1:127.0.0.1:50001,2:127.0.0.1:50002`
+- `--ml-worker-ctrl-map <map>`：按 `stream_id` 路由上游 `REQ_IDR`，格式如 `1:127.0.0.1:30001,2:127.0.0.1:30002`
 - `--ml-worker-ctrl-map-file <path>`：按文件配置 `stream_id -> ip:port` 映射，每行格式 `<stream_id> <ip> <port>`
 
 ### 2.1 当前推荐启动参数
@@ -208,7 +208,7 @@
 - `--ctrl-bind <ip>`：控制输入监听地址
 - `--ctrl-port <port>`：控制输入端口，默认 `31235`
 - `--worker-ctrl-ip <ip>`：下游转发到 `ml_worker` 的控制地址，默认 `127.0.0.1`
-- `--worker-ctrl-port <p>`：下游转发到 `ml_worker` 的控制端口，默认 `50001`
+- `--worker-ctrl-port <p>`：下游转发到 `ml_worker` 的控制端口，默认 `30001`
 - `--token <token>`：可选认证 token
 
 兼容性说明：
@@ -231,7 +231,7 @@
 
 当前批量模式：
 
-- `batch-add`：生成 `worker_sN`，默认 `STREAM_ID=N`、`CONTROL_PORT=50000+N`
+- `batch-add`：生成 `worker_sN`，默认 `STREAM_ID=N`、`CONTROL_PORT=30000+N`
 - `batch-add-ips`：按输入顺序生成，命名规则 `worker_<ip最后一段>`
 - `batch-add-ips` 会自动写出 `deploy/stream_server_ctrl_map.txt`
 - `batch-pair`：按 `worker_sN` 串行配对；可传一个固定 PIN，也可传逗号分隔的 PIN 列表

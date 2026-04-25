@@ -50,7 +50,7 @@ strem_agent_client -- TCP(control) --> strem_agent_server -- UDP(to ml_worker) -
 - `--in-port`：接收 ml_worker TLV（默认 19000）
 - `--video-port`：对外 H264 输出（默认 **31234**）
 - `--ctrl-port`：对外控制输入（默认 31235）
-- `--worker-ctrl-target`：转发到 ml_worker 控制端口（默认 127.0.0.1:50001）
+- `--worker-ctrl-target`：转发到 ml_worker 控制端口（默认 127.0.0.1:30001）
 
 ## 鉴权（v1）
 

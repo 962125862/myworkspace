@@ -184,7 +184,7 @@ cd /home/gejun/work/my_ml_work
   --colorspace 709 \
   --range full \
   --control-bind 0.0.0.0 \
-  --control-port 50001
+  --control-port 30001
 ```
 
 ## 4.5 当前代理链启动命令
@@ -203,7 +203,7 @@ cd /home/gejun/work/my_ml_work
   --codec h264 \
   --chroma 420 \
   --control-bind 127.0.0.1 \
-  --control-port 50001
+  --control-port 30001
 ```
 
 ```bash
@@ -216,8 +216,24 @@ cd /home/gejun/work/my_ml_work
   --ctrl-bind 0.0.0.0 \
   --ctrl-port 31235 \
   --worker-ctrl-ip 127.0.0.1 \
-  --worker-ctrl-port 50001
+  --worker-ctrl-port 30001
 ```
+
+### 4.6 在 192.168.11.31 上保留 ml_worker 控制端口段
+
+当前默认约定改为 `CONTROL_PORT=30000+STREAM_ID`，这样可以避开当前主机默认的临时端口范围 `32768-60999`。
+
+如果你希望这段端口不再被内核自动分配为临时源端口，建议在 `192.168.11.31` 上执行：
+
+```bash
+ssh 192.168.11.31 'echo "net.ipv4.ip_local_reserved_ports = 30001-30256" | sudo tee /etc/sysctl.d/99-ml-worker-ports.conf'
+ssh 192.168.11.31 'sudo sysctl --system'
+```
+
+说明：
+
+- `30001-30256` 覆盖当前 `stream_id <= 256` 的默认控制端口范围
+- 这不会阻止别的程序显式 `bind()` 到同一端口，但会阻止内核把它们当作临时端口自动分配
 
 ## 5. 当前远端同步命令
 

@@ -68,7 +68,7 @@ static void print_usage(const char* prog) {
     printf("  --h264-tap-bind <ip>  H264 tap bind ip (default 127.0.0.1)\n");
     printf("  --h264-tap-stall-ms <ms>  Tap stall threshold (default 200)\n");
     printf("  --h264-tap-drop-idr <0|1> Tap recovery policy (default 1)\n");
-    printf("  --ml-worker-ctrl-map <map> Per-stream routing, e.g. 1:127.0.0.1:50001,2:127.0.0.1:50002\n");
+    printf("  --ml-worker-ctrl-map <map> Per-stream routing, e.g. 1:127.0.0.1:30001,2:127.0.0.1:30002\n");
     printf("  --ml-worker-ctrl-map-file <path>  File-based per-stream routing; each line: <stream_id> <ip> <port>\n");
     printf("  --help                Show this help\n");
 }

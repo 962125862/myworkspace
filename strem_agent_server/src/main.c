@@ -95,7 +95,7 @@ static void usage(const char* prog) {
             "  --ctrl-bind <ip>         (default 0.0.0.0)\n"
             "  --ctrl-port <port>       (default 31235)\n"
             "  --worker-ctrl-ip <ip>    (default 127.0.0.1)\n"
-            "  --worker-ctrl-port <p>   (default 50001)\n"
+            "  --worker-ctrl-port <p>   (default 30001)\n"
             "  --token <token>          (default empty: auth disabled)\n",
             prog);
 }
@@ -109,7 +109,7 @@ static void cfg_init(AgentCfg* c) {
     snprintf(c->ctrl_bind, sizeof(c->ctrl_bind), "0.0.0.0");
     c->ctrl_port = 31235;
     snprintf(c->worker_ctrl_ip, sizeof(c->worker_ctrl_ip), "127.0.0.1");
-    c->worker_ctrl_port = 50001;
+    c->worker_ctrl_port = 30001;
     c->token[0] = '\0';
 }
 

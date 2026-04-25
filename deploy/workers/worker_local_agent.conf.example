@@ -12,7 +12,7 @@ STREAM_ID="1"
 
 # ml_worker local UDP control socket (agent_server forwards control to this)
 CONTROL_BIND="0.0.0.0"
-CONTROL_PORT="50001"
+CONTROL_PORT="30001"
 
 # Video params
 WIDTH="1024"
