@@ -9,6 +9,8 @@
 ## 快速入口
 
 - 当前主链路说明：`deploy/CHAIN_ml_worker_stream_server.md`
+- 当前使用手册：`deploy/USAGE_MANUAL_CURRENT.md`
+- 当前维护手册：`deploy/MAINTENANCE_MANUAL_CURRENT.md`
 - 当前架构设计：`deploy/ARCHITECTURE_CURRENT.md`
 - 当前参数说明：`deploy/CLI_REFERENCE_CURRENT.md`
 - 当前构建/部署命令：`deploy/BUILD_DEPLOY_COMMANDS_CURRENT.md`
