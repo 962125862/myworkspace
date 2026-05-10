@@ -15,6 +15,18 @@ import json
 import time
 
 
+def parse_roi(spec):
+    if not spec:
+        return None
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("ROI must be x,y,w,h")
+    x, y, w, h = (int(p) for p in parts)
+    if w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError("ROI w/h must be positive")
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--addr", default="tcp://127.0.0.1:5566")
@@ -22,6 +34,7 @@ def main() -> int:
     ap.add_argument("--timeout-ms", type=int, default=1000)
     ap.add_argument("--title", default="stream_server_bgr")
     ap.add_argument("--report-every", type=float, default=2.0)
+    ap.add_argument("--roi", type=parse_roi, default=None, help="optional ROI: x,y,w,h")
     args = ap.parse_args()
 
     import cv2  # type: ignore
@@ -37,8 +50,9 @@ def main() -> int:
     req = {
         "stream_id": args.stream_id,
         "timeout_ms": args.timeout_ms,
-        "request_new": False,
     }
+    if args.roi is not None:
+        req["roi"] = args.roi
     payload = json.dumps(req).encode("utf-8")
 
     frames = 0

@@ -8,6 +8,7 @@
 #include "zmq_bridge.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -32,6 +33,10 @@ typedef struct {
     int width;
     int height;
     int stride;
+    int source_width;
+    int source_height;
+    int roi_x;
+    int roi_y;
     int64_t pts;
     int key_frame;
     uint64_t mono_ns;
@@ -45,6 +50,24 @@ typedef struct {
 typedef struct {
     ZmqBgrFrame* frame;
 } ZmqBgrCacheEntry;
+
+typedef struct {
+    int requested;
+    int x;
+    int y;
+    int w;
+    int h;
+} ZmqRoiRequest;
+
+typedef struct {
+    int x;
+    int y;
+    int w;
+    int h;
+    int source_width;
+    int source_height;
+    int applied;
+} ZmqResolvedRoi;
 
 typedef struct {
     StreamManager* mgr;
@@ -176,61 +199,182 @@ static int msg_is_more(void* sock) {
     return more;
 }
 
-static int parse_stream_id_from_json(const char* json, size_t len) {
-    if (!json || len == 0) return 1;
-    const char* p = json;
-    const char* end = json + len;
-    const char* key = "\"stream_id\"";
-    const size_t klen = strlen(key);
+static int is_json_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
 
-    while (p + klen < end) {
+static const char* find_json_key(const char* json, const char* end, const char* key) {
+    const size_t klen = strlen(key);
+    if (!json || !end || !key || klen == 0) {
+        return NULL;
+    }
+    for (const char* p = json; p + klen <= end; p++) {
         if (memcmp(p, key, klen) == 0) {
-            p += klen;
-            while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':')) p++;
-            int v = 0;
-            int any = 0;
-            while (p < end && *p >= '0' && *p <= '9') {
-                any = 1;
-                v = v * 10 + (*p - '0');
-                p++;
-            }
-            if (any && v > 0) return v;
-            return 1;
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static const char* skip_json_ws(const char* p, const char* end) {
+    while (p < end && is_json_ws(*p)) {
+        p++;
+    }
+    return p;
+}
+
+static int parse_json_int_key(const char* json, size_t len, const char* key, int* out) {
+    if (!json || len == 0 || !key || !out) {
+        return 0;
+    }
+
+    const char* end = json + len;
+    const char* p = find_json_key(json, end, key);
+    if (!p) {
+        return 0;
+    }
+
+    p += strlen(key);
+    p = skip_json_ws(p, end);
+    if (p >= end || *p != ':') {
+        return 0;
+    }
+    p++;
+    p = skip_json_ws(p, end);
+
+    int sign = 1;
+    if (p < end && *p == '-') {
+        sign = -1;
+        p++;
+    }
+
+    int any = 0;
+    long long v = 0;
+    while (p < end && *p >= '0' && *p <= '9') {
+        any = 1;
+        v = v * 10 + (*p - '0');
+        if (v > (long long)INT_MAX + 1ll) {
+            return 0;
         }
         p++;
+    }
+    if (!any) {
+        return 0;
+    }
+
+    long long signed_v = sign > 0 ? v : -v;
+    if (signed_v < INT_MIN || signed_v > INT_MAX) {
+        return 0;
+    }
+    *out = (int)signed_v;
+    return 1;
+}
+
+static int parse_stream_id_from_json(const char* json, size_t len) {
+    int v = 0;
+    if (parse_json_int_key(json, len, "\"stream_id\"", &v) && v > 0) {
+        return v;
     }
     return 1;
 }
 
 static int parse_timeout_ms_from_json(const char* json, size_t len, int default_ms) {
-    if (!json || len == 0) return default_ms;
-    const char* p = json;
-    const char* end = json + len;
-    const char* key = "\"timeout_ms\"";
-    const size_t klen = strlen(key);
-
-    while (p + klen < end) {
-        if (memcmp(p, key, klen) == 0) {
-            p += klen;
-            while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':')) p++;
-            int sign = 1;
-            if (p < end && *p == '-') {
-                sign = -1;
-                p++;
-            }
-            int v = 0;
-            int any = 0;
-            while (p < end && *p >= '0' && *p <= '9') {
-                any = 1;
-                v = v * 10 + (*p - '0');
-                p++;
-            }
-            if (any) return v * sign;
-            return default_ms;
-        }
-        p++;
+    int v = 0;
+    if (parse_json_int_key(json, len, "\"timeout_ms\"", &v)) {
+        return v;
     }
     return default_ms;
+}
+
+static int parse_roi_from_json(const char* json, size_t len, ZmqRoiRequest* roi) {
+    if (!roi) {
+        return -1;
+    }
+    memset(roi, 0, sizeof(*roi));
+
+    if (!json || len == 0) {
+        return 0;
+    }
+
+    const char* end = json + len;
+    const char* p = find_json_key(json, end, "\"roi\"");
+    if (!p) {
+        return 0;
+    }
+
+    p += strlen("\"roi\"");
+    p = skip_json_ws(p, end);
+    if (p >= end || *p != ':') {
+        return -1;
+    }
+    p++;
+    p = skip_json_ws(p, end);
+
+    if (p + 4 <= end && memcmp(p, "null", 4) == 0) {
+        return 0;
+    }
+    if (p >= end || *p != '{') {
+        return -1;
+    }
+
+    const char* obj_start = p + 1;
+    const char* obj_end = NULL;
+    int depth = 1;
+    int in_string = 0;
+    int escaped = 0;
+    for (const char* q = p + 1; q < end; q++) {
+        char c = *q;
+        if (in_string) {
+            if (escaped) {
+                escaped = 0;
+            } else if (c == '\\') {
+                escaped = 1;
+            } else if (c == '"') {
+                in_string = 0;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = 1;
+        } else if (c == '{') {
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+                obj_end = q;
+                break;
+            }
+        }
+    }
+    if (!obj_end || obj_end < obj_start) {
+        return -1;
+    }
+
+    const size_t obj_len = (size_t)(obj_end - obj_start);
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    if (!parse_json_int_key(obj_start, obj_len, "\"x\"", &x) ||
+        !parse_json_int_key(obj_start, obj_len, "\"y\"", &y)) {
+        return -1;
+    }
+    if (!parse_json_int_key(obj_start, obj_len, "\"w\"", &w) &&
+        !parse_json_int_key(obj_start, obj_len, "\"width\"", &w)) {
+        return -1;
+    }
+    if (!parse_json_int_key(obj_start, obj_len, "\"h\"", &h) &&
+        !parse_json_int_key(obj_start, obj_len, "\"height\"", &h)) {
+        return -1;
+    }
+
+    roi->requested = 1;
+    roi->x = x;
+    roi->y = y;
+    roi->w = w;
+    roi->h = h;
+    return 1;
 }
 
 static void free_bgr_frame(ZmqBgrFrame* f) {
@@ -337,6 +481,10 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
     frame->width = converted.width;
     frame->height = converted.height;
     frame->stride = converted.linesize[0];
+    frame->source_width = converted.width;
+    frame->source_height = converted.height;
+    frame->roi_x = 0;
+    frame->roi_y = 0;
     frame->pts = converted.pts;
     frame->key_frame = converted.key_frame ? 1 : 0;
     frame->mono_ns = monotonic_ns();
@@ -370,6 +518,110 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
     }
 
     *out = frame;
+    return 0;
+}
+
+static int resolve_bgr_roi(const ZmqBgrFrame* frame, const ZmqRoiRequest* req,
+                           ZmqResolvedRoi* roi) {
+    if (!frame || !roi || frame->width <= 0 || frame->height <= 0 ||
+        frame->stride < frame->width * 3) {
+        return -1;
+    }
+
+    roi->source_width = frame->width;
+    roi->source_height = frame->height;
+
+    if (!req || !req->requested) {
+        roi->x = 0;
+        roi->y = 0;
+        roi->w = frame->width;
+        roi->h = frame->height;
+        roi->applied = 0;
+        return 0;
+    }
+
+    if (req->w <= 0 || req->h <= 0) {
+        return -1;
+    }
+
+    int64_t x = req->x;
+    int64_t y = req->y;
+    int64_t right = x + req->w;
+    int64_t bottom = y + req->h;
+
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+    if (right > frame->width) {
+        right = frame->width;
+    }
+    if (bottom > frame->height) {
+        bottom = frame->height;
+    }
+
+    if (right <= x || bottom <= y) {
+        return -1;
+    }
+
+    roi->x = (int)x;
+    roi->y = (int)y;
+    roi->w = (int)(right - x);
+    roi->h = (int)(bottom - y);
+    roi->applied = !(roi->x == 0 && roi->y == 0 &&
+                     roi->w == frame->width && roi->h == frame->height);
+    return 0;
+}
+
+static int crop_bgr_frame(const ZmqBgrFrame* src, const ZmqResolvedRoi* roi,
+                          ZmqBgrFrame** out) {
+    if (!src || !roi || !out || !src->bgr || roi->w <= 0 || roi->h <= 0 ||
+        src->stride < src->width * 3) {
+        return -1;
+    }
+
+    *out = NULL;
+    const int dst_stride = roi->w * 3;
+    const size_t bgr_sz = (size_t)dst_stride * (size_t)roi->h;
+    uint8_t* bgr = (uint8_t*)malloc(bgr_sz);
+    if (!bgr) {
+        return -1;
+    }
+
+    for (int row = 0; row < roi->h; row++) {
+        const uint8_t* src_row = src->bgr +
+            (size_t)(roi->y + row) * (size_t)src->stride +
+            (size_t)roi->x * 3u;
+        uint8_t* dst_row = bgr + (size_t)row * (size_t)dst_stride;
+        memcpy(dst_row, src_row, (size_t)dst_stride);
+    }
+
+    ZmqBgrFrame* dst = (ZmqBgrFrame*)calloc(1, sizeof(*dst));
+    if (!dst) {
+        free(bgr);
+        return -1;
+    }
+
+    atomic_init(&dst->refcount, 1u);
+    dst->stream_id = src->stream_id;
+    dst->width = roi->w;
+    dst->height = roi->h;
+    dst->stride = dst_stride;
+    dst->source_width = roi->source_width;
+    dst->source_height = roi->source_height;
+    dst->roi_x = roi->x;
+    dst->roi_y = roi->y;
+    dst->pts = src->pts;
+    dst->key_frame = src->key_frame;
+    dst->mono_ns = src->mono_ns;
+    dst->color_space = src->color_space;
+    dst->color_range = src->color_range;
+    dst->source_format = src->source_format;
+    dst->bgr = bgr;
+    dst->bgr_sz = bgr_sz;
+    *out = dst;
     return 0;
 }
 
@@ -497,44 +749,84 @@ static void* zmq_bridge_thread(void* p) {
                    memcmp(cmd, "GET_LATEST_BGR", cmd_len) == 0) {
             int stream_id = parse_stream_id_from_json(json, json_len);
             int timeout_ms = parse_timeout_ms_from_json(json, json_len, 1000);
-            StreamContext* stream = stream_manager_get(arg->mgr, (uint16_t)stream_id);
-            if (!stream) {
+            ZmqRoiRequest roi_req;
+            int roi_parse = parse_roi_from_json(json, json_len, &roi_req);
+            if (roi_parse < 0) {
                 (void)send_frame(router, "ERR", 3, 1);
-                (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
+                (void)send_frame(router, "bad roi", strlen("bad roi"), 0);
             } else {
-                ZmqBgrFrame* frame = NULL;
-                if (convert_last_frame_to_bgr(stream, arg, &frame) != 0 && timeout_ms != 0) {
-                    const uint64_t deadline =
-                        monotonic_ns() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000000ull;
-                    while (timeout_ms < 0 || monotonic_ns() < deadline) {
-                        struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
-                        nanosleep(&ts, NULL);
-                        if (convert_last_frame_to_bgr(stream, arg, &frame) == 0) {
-                            break;
+                StreamContext* stream = stream_manager_get(arg->mgr, (uint16_t)stream_id);
+                if (!stream) {
+                    (void)send_frame(router, "ERR", 3, 1);
+                    (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
+                } else {
+                    ZmqBgrFrame* frame = NULL;
+                    if (convert_last_frame_to_bgr(stream, arg, &frame) != 0 && timeout_ms != 0) {
+                        const uint64_t deadline =
+                            monotonic_ns() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000000ull;
+                        while (timeout_ms < 0 || monotonic_ns() < deadline) {
+                            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+                            nanosleep(&ts, NULL);
+                            if (convert_last_frame_to_bgr(stream, arg, &frame) == 0) {
+                                break;
+                            }
                         }
                     }
-                }
 
-                if (!frame) {
-                    (void)send_frame(router, "ERR", 3, 1);
-                    (void)send_frame(router, "no frame yet", strlen("no frame yet"), 0);
-                } else {
-                    char meta[256];
-                    int meta_n = snprintf(
-                        meta, sizeof(meta),
-                        "{\"stream_id\":%d,\"width\":%d,\"height\":%d,\"stride\":%d,"
-                        "\"pts\":%lld,\"mono_ns\":%llu,\"key_frame\":%d,\"pixfmt\":\"bgr24\","
-                        "\"color_space\":\"%s#%u\",\"color_range\":\"%s#%u\"}",
-                        (int)frame->stream_id, frame->width, frame->height, frame->stride,
-                        (long long)frame->pts, (unsigned long long)frame->mono_ns, frame->key_frame,
-                        color_space_name(frame->color_space), frame->color_space,
-                        color_range_name(frame->color_range), frame->color_range);
-                    if (meta_n < 0) meta_n = 0;
-                    if ((size_t)meta_n >= sizeof(meta)) meta_n = (int)sizeof(meta) - 1;
+                    if (!frame) {
+                        (void)send_frame(router, "ERR", 3, 1);
+                        (void)send_frame(router, "no frame yet", strlen("no frame yet"), 0);
+                    } else {
+                        ZmqResolvedRoi roi;
+                        ZmqBgrFrame* reply_frame = frame;
+                        if (resolve_bgr_roi(frame, &roi_req, &roi) != 0) {
+                            free_bgr_frame(frame);
+                            (void)send_frame(router, "ERR", 3, 1);
+                            (void)send_frame(router, "bad roi", strlen("bad roi"), 0);
+                        } else {
+                            if (roi.applied) {
+                                ZmqBgrFrame* cropped = NULL;
+                                if (crop_bgr_frame(frame, &roi, &cropped) != 0) {
+                                    free_bgr_frame(frame);
+                                    (void)send_frame(router, "ERR", 3, 1);
+                                    (void)send_frame(router, "roi crop failed",
+                                                     strlen("roi crop failed"), 0);
+                                    goto request_done;
+                                }
+                                free_bgr_frame(frame);
+                                reply_frame = cropped;
+                            }
 
-                    (void)send_frame(router, "OK", 2, 1);
-                    (void)send_frame(router, meta, (size_t)meta_n, 1);
-                    (void)send_bgr_frame_owned(router, frame);
+                            char meta[512];
+                            int meta_n = snprintf(
+                                meta, sizeof(meta),
+                                "{\"stream_id\":%d,\"width\":%d,\"height\":%d,\"stride\":%d,"
+                                "\"source_width\":%d,\"source_height\":%d,"
+                                "\"roi_x\":%d,\"roi_y\":%d,\"roi_width\":%d,\"roi_height\":%d,"
+                                "\"roi_applied\":%s,"
+                                "\"pts\":%lld,\"mono_ns\":%llu,\"key_frame\":%d,\"pixfmt\":\"bgr24\","
+                                "\"color_space\":\"%s#%u\",\"color_range\":\"%s#%u\"}",
+                                (int)reply_frame->stream_id,
+                                reply_frame->width, reply_frame->height, reply_frame->stride,
+                                reply_frame->source_width, reply_frame->source_height,
+                                reply_frame->roi_x, reply_frame->roi_y,
+                                reply_frame->width, reply_frame->height,
+                                roi.applied ? "true" : "false",
+                                (long long)reply_frame->pts,
+                                (unsigned long long)reply_frame->mono_ns,
+                                reply_frame->key_frame,
+                                color_space_name(reply_frame->color_space), reply_frame->color_space,
+                                color_range_name(reply_frame->color_range), reply_frame->color_range);
+                            if (meta_n < 0) meta_n = 0;
+                            if ((size_t)meta_n >= sizeof(meta)) meta_n = (int)sizeof(meta) - 1;
+
+                            (void)send_frame(router, "OK", 2, 1);
+                            (void)send_frame(router, meta, (size_t)meta_n, 1);
+                            (void)send_bgr_frame_owned(router, reply_frame);
+                        }
+request_done:
+                        ;
+                    }
                 }
             }
         } else {

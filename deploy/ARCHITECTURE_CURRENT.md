@@ -175,7 +175,12 @@ strem_agent_client
 协议：
 
 - request: `GET_LATEST_BGR`
+- json:
+  - 全帧：`{"stream_id":1,"timeout_ms":1000}`
+  - ROI：`{"stream_id":1,"timeout_ms":1000,"roi":{"x":100,"y":80,"w":640,"h":360}}`
 - reply: `[status][meta_json][bgr24]`
+- `roi` 是输出裁剪，不进入解码层；服务端仍从 `last_frame` 生成/复用整帧 `BGR24`，再返回 ROI payload
+- `request_new` 是旧字段，当前服务端忽略，新客户端不再发送
 
 ### 5.1 相关启动环境变量
 

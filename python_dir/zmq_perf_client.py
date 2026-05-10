@@ -19,12 +19,25 @@ import json
 import time
 
 
+def parse_roi(spec):
+    if not spec:
+        return None
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("ROI must be x,y,w,h")
+    x, y, w, h = (int(p) for p in parts)
+    if w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError("ROI w/h must be positive")
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--addr", default="tcp://127.0.0.1:5566")
     ap.add_argument("--stream-id", type=int, default=1)
     ap.add_argument("--frames", type=int, default=200)
     ap.add_argument("--timeout-ms", type=int, default=1000)
+    ap.add_argument("--roi", type=parse_roi, default=None, help="optional ROI: x,y,w,h")
     ap.add_argument(
         "--cmd",
         choices=["GET_LATEST_BGR"],
@@ -44,8 +57,9 @@ def main() -> int:
     req = {
         "stream_id": args.stream_id,
         "timeout_ms": args.timeout_ms,
-        "request_new": False,
     }
+    if args.roi is not None:
+        req["roi"] = args.roi
     payload = json.dumps(req).encode("utf-8")
     cmd_b = args.cmd.encode("ascii")
 
@@ -86,6 +100,8 @@ def main() -> int:
     avg_age = (age_sum_ms / age_cnt) if age_cnt else None
     print("\n=== summary ===")
     print(f"addr={args.addr} stream={args.stream_id} cmd={args.cmd}")
+    if args.roi is not None:
+        print(f"roi={args.roi['x']},{args.roi['y']},{args.roi['w']},{args.roi['h']}")
     print(f"frames={n} ok={ok}")
     print(f"avg_rtt_ms={avg_ms:.3f} max_rtt_ms={dt_max:.3f}")
     if avg_age is not None:

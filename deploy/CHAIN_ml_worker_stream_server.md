@@ -135,10 +135,16 @@ color_range
 - ipc bind：`ipc:///tmp/stream_server_bgr.sock`
 - 默认行为：只要启用了 `--zmq-bridge-bind`，就会自动同时启用上面的 IPC 地址；只有想改路径时才需要额外传 `--zmq-bridge-ipc-bind`
 - 命令：`GET_LATEST_BGR`
+- 请求 JSON：
+  - 全帧：`{"stream_id":1,"timeout_ms":1000}`
+  - ROI：`{"stream_id":1,"timeout_ms":1000,"roi":{"x":100,"y":80,"w":640,"h":360}}`
 - 行为：请求时从对应流的 `last_frame` 生成一帧 `BGR24`
   - `last_frame` 是硬件帧时，先 `av_hwframe_transfer_data()` 下载到 CPU
   - 然后统一调用 `decoder_convert_format_with_info(..., DECODE_FMT_BGR24)`
   - 对同一帧的重复请求，bridge 内部会复用最近一次生成的 `BGR24` 结果
+  - `roi` 是可选输出裁剪参数：先复用整帧 `BGR24`，再只返回 ROI 的 tight `BGR24` payload，用于节省 ZMQ/IPC 带宽
+  - `roi` 坐标基于源帧左上角，`w/h` 必须为正；超出源帧边界的部分会被裁掉，无交集则返回 `ERR bad roi`
+  - `request_new` 是旧字段，服务端继续忽略；新客户端不要再发送
   - 已知快路径：
     - `NV12 -> BGR24` 走 `libyuv`
     - `YUV420P -> BGR24` 走 `libyuv`
@@ -159,6 +165,13 @@ color_range
 - `width`
 - `height`
 - `stride`
+- `source_width`
+- `source_height`
+- `roi_x`
+- `roi_y`
+- `roi_width`
+- `roi_height`
+- `roi_applied`
 - `pts`
 - `mono_ns`
 - `key_frame`

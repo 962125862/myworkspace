@@ -12,15 +12,19 @@
  *     - "PING"
  *
  *   json:
- *     {"stream_id": 1, "timeout_ms": 1000, "request_new": true}
+ *     {"stream_id": 1, "timeout_ms": 1000}
+ *     {"stream_id": 1, "timeout_ms": 1000, "roi": {"x": 100, "y": 80, "w": 640, "h": 360}}
  *   说明：收到请求时，会从对应流的 last_frame 按需生成 BGR24 并返回。
  *        如果 last_frame 还是硬件帧，则先下载到 CPU，再走统一像素格式适配层。
  *        对同一帧的重复请求，bridge 内部会复用最近一次生成的 BGR24 结果。
+ *        roi 是可选输出裁剪参数，坐标基于源帧左上角；省 IPC payload，不改变解码路径。
+ *        旧客户端传入的 request_new 会被忽略。
  *
  *   Reply multipart (client 看到):
  *     [status][meta_json][bgr24]
  *
- *   meta_json 至少包含 width/height/pts/key_frame/mono_ns/stream_id/pixfmt/stride。
+ *   meta_json 至少包含 width/height/source_width/source_height/roi_x/roi_y/
+ *   roi_width/roi_height/pts/key_frame/mono_ns/stream_id/pixfmt/stride。
  */
 
 #ifndef ZMQ_BRIDGE_H

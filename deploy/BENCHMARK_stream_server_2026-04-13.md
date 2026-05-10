@@ -116,4 +116,4 @@ Observed:
 Known existing limitation not addressed here:
 
 - the bridge is still single-threaded
-- `request_new` is still ignored by the server side
+- `request_new` remains a legacy ignored field; current clients omit it

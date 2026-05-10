@@ -49,6 +49,18 @@ def parse_streams(spec: str) -> list[int]:
     return deduped
 
 
+def parse_roi(spec):
+    if not spec:
+        return None
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("ROI must be x,y,w,h")
+    x, y, w, h = (int(p) for p in parts)
+    if w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError("ROI w/h must be positive")
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
 def percentile(values: list[float], q: float) -> float:
     if not values:
         return 0.0
@@ -81,7 +93,7 @@ def worker(
     fps: float,
     duration_sec: float,
     timeout_ms: int,
-    request_new: bool,
+    roi,
     start_event: threading.Event,
     done: dict[int, StreamStats],
     done_lock: threading.Lock,
@@ -89,13 +101,13 @@ def worker(
     import zmq  # type: ignore
 
     stats = StreamStats(stream_id=stream_id)
-    payload = json.dumps(
-        {
-            "stream_id": stream_id,
-            "timeout_ms": timeout_ms,
-            "request_new": request_new,
-        }
-    ).encode("utf-8")
+    req = {
+        "stream_id": stream_id,
+        "timeout_ms": timeout_ms,
+    }
+    if roi is not None:
+        req["roi"] = roi
+    payload = json.dumps(req).encode("utf-8")
 
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.DEALER)
@@ -202,7 +214,8 @@ def main() -> int:
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--duration-sec", type=float, default=30.0)
     ap.add_argument("--timeout-ms", type=int, default=1000)
-    ap.add_argument("--request-new", action="store_true")
+    ap.add_argument("--roi", type=parse_roi, default=None, help="optional ROI: x,y,w,h")
+    ap.add_argument("--request-new", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     stream_ids = parse_streams(args.streams)
@@ -221,7 +234,7 @@ def main() -> int:
                 "fps": args.fps,
                 "duration_sec": args.duration_sec,
                 "timeout_ms": args.timeout_ms,
-                "request_new": args.request_new,
+                "roi": args.roi,
                 "start_event": start_event,
                 "done": done,
                 "done_lock": done_lock,

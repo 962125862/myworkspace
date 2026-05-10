@@ -19,6 +19,18 @@ import json
 import time
 
 
+def parse_roi(spec):
+    if not spec:
+        return None
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("ROI must be x,y,w,h")
+    x, y, w, h = (int(p) for p in parts)
+    if w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError("ROI w/h must be positive")
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--addr", default="tcp://127.0.0.1:5566")
@@ -28,6 +40,7 @@ def main() -> int:
     ap.add_argument("--out", default="/tmp/frame.png")
     ap.add_argument("--duration-sec", type=float, default=60.0)
     ap.add_argument("--report-every", type=int, default=5)
+    ap.add_argument("--roi", type=parse_roi, default=None, help="optional ROI: x,y,w,h")
     args = ap.parse_args()
 
     import zmq  # type: ignore
@@ -42,8 +55,9 @@ def main() -> int:
     req = {
         "stream_id": args.stream_id,
         "timeout_ms": args.timeout_ms,
-        "request_new": False,
     }
+    if args.roi is not None:
+        req["roi"] = args.roi
     payload = json.dumps(req).encode("utf-8")
     cmd_b = args.cmd.encode("ascii")
 
@@ -71,8 +85,10 @@ def main() -> int:
         raise SystemExit(f"failed to fetch first frame: {last_err}")
     w = int(meta["width"])
     h = int(meta["height"])
+    stride = int(meta.get("stride", w * 3))
     import numpy as np  # type: ignore
-    bgr_img = np.frombuffer(bgr, dtype=np.uint8).reshape((h, w, 3))
+    bgr_img = np.frombuffer(bgr, dtype=np.uint8).reshape((h, stride))
+    bgr_img = bgr_img[:, : w * 3].reshape((h, w, 3))
     ok = cv2.imwrite(args.out, bgr_img)
     if not ok:
         raise SystemExit(f"cv2.imwrite failed: {args.out}")
@@ -118,6 +134,8 @@ def main() -> int:
     avg_age = (age_sum / age_cnt) if age_cnt else None
     print("\n=== summary ===")
     print(f"addr={args.addr} stream={args.stream_id} cmd={args.cmd}")
+    if args.roi is not None:
+        print(f"roi={args.roi['x']},{args.roi['y']},{args.roi['w']},{args.roi['h']}")
     print(f"duration_sec={args.duration_sec} ok={ok_n}")
     print(f"avg_rtt_ms={avg_rtt:.3f} max_rtt_ms={rtt_max:.3f}")
     if avg_age is not None:

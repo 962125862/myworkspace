@@ -171,6 +171,7 @@
   - 默认 `on`
   - 作用：硬解时 `last_frame` 默认保留为硬件帧引用，不在每次 decode 后立刻 `GPU -> CPU` 下载
   - 取图时（当前主要是 ZMQ `GET_LATEST_BGR`）再按需 `av_hwframe_transfer_data()` 下载并转 `BGR24`
+  - `GET_LATEST_BGR` 可带 `roi:{"x","y","w","h"}` 只返回 ROI payload；这是输出裁剪，用于节省 ZMQ/IPC 带宽，不改变解码和整帧转换路径
 - `STREAM_NVDEC_EXTRA_HW_FRAMES`
   - 默认：`STREAM_DEFER_HW_DOWNLOAD=on` 时为 `24`，关闭延迟下载时为 `8`
   - 作用：给 NVDEC/VAAPI 多留一些硬件 surface 余量，避免 `last_frame` 仍持有硬件帧引用时把帧池顶满

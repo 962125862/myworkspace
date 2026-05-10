@@ -52,6 +52,7 @@ Docker / Sunshine
 ### 3. ZMQ bridge 工程化改造
 
 - `GET_LATEST_BGR` 支持按帧缓存最近一次 `BGR24`
+- `GET_LATEST_BGR` 支持可选输出 ROI，返回裁剪后的 tight `BGR24` payload 以降低 IPC 带宽
 - BGR payload 改成 zero-copy 发送，减少一次额外 memcpy
 - 新增第二个监听地址能力：同一个 `ROUTER` 可同时 bind `tcp` 和 `ipc`
 - 只要启用了 `--zmq-bridge-bind`，默认就会再启一个 `ipc:///tmp/stream_server_bgr.sock`
