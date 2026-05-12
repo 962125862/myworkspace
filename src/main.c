@@ -987,6 +987,10 @@ static int run_stream_command(const StreamOptions* opt) {
     if (err != 0) {
         fprintf(stderr, "LiStartConnection failed: %d\n", err);
         connection_callbacks_set_fatal_code(NULL);
+        if (fatal_code != WORKER_FATAL_NONE) {
+            fprintf(stderr, "fatal_code=%d, stopping worker\n", fatal_code);
+            return 100 + fatal_code;
+        }
         return 6;
     }
 

@@ -9,5 +9,6 @@
 #define WORKER_FATAL_TCP_CONNECT             5
 #define WORKER_FATAL_TCP_SEND                6
 #define WORKER_FATAL_TCP_DISCONNECTED        7
+#define WORKER_FATAL_NEGOTIATION_MISMATCH    8
 
 #endif

@@ -62,6 +62,87 @@ static const char* video_format_name(int videoFormat) {
     }
 }
 
+static const char* stream_codec_name(uint32_t codec) {
+    switch (codec) {
+        case 0:  return "h264";
+        case 1:  return "hevc";
+        case 2:  return "av1";
+        default: return "unknown";
+    }
+}
+
+static const char* stream_chroma_name(uint32_t chroma) {
+    switch (chroma) {
+        case 0:  return "420";
+        case 1:  return "444";
+        default: return "unknown";
+    }
+}
+
+static int video_format_to_stream_metadata(int videoFormat,
+                                           uint32_t* codec,
+                                           uint32_t* chroma,
+                                           uint32_t* bitdepth) {
+    if (!codec || !chroma || !bitdepth) {
+        return -1;
+    }
+
+    switch (videoFormat) {
+        case VIDEO_FORMAT_H264:
+            *codec = 0;
+            *chroma = 0;
+            *bitdepth = 8;
+            return 0;
+        case VIDEO_FORMAT_H264_HIGH8_444:
+            *codec = 0;
+            *chroma = 1;
+            *bitdepth = 8;
+            return 0;
+        case VIDEO_FORMAT_H265:
+            *codec = 1;
+            *chroma = 0;
+            *bitdepth = 8;
+            return 0;
+        case VIDEO_FORMAT_H265_MAIN10:
+            *codec = 1;
+            *chroma = 0;
+            *bitdepth = 10;
+            return 0;
+        case VIDEO_FORMAT_H265_REXT8_444:
+            *codec = 1;
+            *chroma = 1;
+            *bitdepth = 8;
+            return 0;
+        case VIDEO_FORMAT_H265_REXT10_444:
+            *codec = 1;
+            *chroma = 1;
+            *bitdepth = 10;
+            return 0;
+        case VIDEO_FORMAT_AV1_MAIN8:
+            *codec = 2;
+            *chroma = 0;
+            *bitdepth = 8;
+            return 0;
+        case VIDEO_FORMAT_AV1_MAIN10:
+            *codec = 2;
+            *chroma = 0;
+            *bitdepth = 10;
+            return 0;
+        case VIDEO_FORMAT_AV1_HIGH8_444:
+            *codec = 2;
+            *chroma = 1;
+            *bitdepth = 8;
+            return 0;
+        case VIDEO_FORMAT_AV1_HIGH10_444:
+            *codec = 2;
+            *chroma = 1;
+            *bitdepth = 10;
+            return 0;
+        default:
+            return -1;
+    }
+}
+
 static uint64_t now_monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -174,6 +255,37 @@ static int worker_setup(int videoFormat, int width, int height, int redrawRate, 
         return -1;
     }
 
+    uint32_t negotiated_codec = 0;
+    uint32_t negotiated_chroma = 0;
+    uint32_t negotiated_bitdepth = 0;
+    if (video_format_to_stream_metadata(videoFormat,
+                                        &negotiated_codec,
+                                        &negotiated_chroma,
+                                        &negotiated_bitdepth) != 0) {
+        fprintf(stderr,
+                "[ml_worker] unknown negotiated video format: %s(0x%x)\n",
+                video_format_name(videoFormat), videoFormat);
+        set_fatal_once(WORKER_FATAL_NEGOTIATION_MISMATCH);
+        return -1;
+    }
+
+    if (g_cfg->codec != negotiated_codec ||
+        g_cfg->chroma != negotiated_chroma ||
+        g_cfg->bitdepth != negotiated_bitdepth) {
+        fprintf(stderr,
+                "[ml_worker] negotiated video format mismatch: requested=%s/%s/%u, "
+                "got=%s(0x%x) -> %s/%s/%u; refusing silent downgrade\n",
+                stream_codec_name(g_cfg->codec),
+                stream_chroma_name(g_cfg->chroma),
+                g_cfg->bitdepth,
+                video_format_name(videoFormat), videoFormat,
+                stream_codec_name(negotiated_codec),
+                stream_chroma_name(negotiated_chroma),
+                negotiated_bitdepth);
+        set_fatal_once(WORKER_FATAL_NEGOTIATION_MISMATCH);
+        return -1;
+    }
+
     /* 初始化TCP发送器配置 */
     TcpSenderConfig tcp_config;
     memset(&tcp_config, 0, sizeof(tcp_config));
@@ -186,9 +298,9 @@ static int worker_setup(int videoFormat, int width, int height, int redrawRate, 
     tcp_config.height = (uint32_t)height;
     tcp_config.fps = g_cfg->fps ? g_cfg->fps : 60;
     tcp_config.bitrate = g_cfg->bitrate ? g_cfg->bitrate : 10000;
-    tcp_config.codec = g_cfg->codec;
-    tcp_config.chroma = g_cfg->chroma;
-    tcp_config.bitdepth = g_cfg->bitdepth;
+    tcp_config.codec = negotiated_codec;
+    tcp_config.chroma = negotiated_chroma;
+    tcp_config.bitdepth = negotiated_bitdepth;
     tcp_config.video_format = (uint32_t)videoFormat;
     tcp_config.color_space = g_cfg->color_space;
     tcp_config.color_range = g_cfg->color_range;
@@ -197,6 +309,9 @@ static int worker_setup(int videoFormat, int width, int height, int redrawRate, 
     g_cfg->width = (uint32_t)width;
     g_cfg->height = (uint32_t)height;
     g_cfg->video_format = (uint32_t)videoFormat;
+    g_cfg->codec = negotiated_codec;
+    g_cfg->chroma = negotiated_chroma;
+    g_cfg->bitdepth = negotiated_bitdepth;
 
     /* 初始化TCP发送器 */
     if (tcp_sender_init(&g_tcp_sender, &tcp_config) < 0) {
