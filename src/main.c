@@ -34,6 +34,20 @@ extern const char* gs_error;
 static volatile int g_running = 1;
 
 #define HOST_OFFLINE_RETRY_SEC 30
+#define NEGOTIATION_MISMATCH_RETRY_DELAY_SEC 60
+
+static void delay_before_fatal_exit_if_needed(int fatal_code) {
+    if (fatal_code != WORKER_FATAL_NEGOTIATION_MISMATCH) {
+        return;
+    }
+
+    fprintf(stderr,
+            "[ml_worker] fatal_code=%d, sleeping %d seconds before exit\n",
+            fatal_code, NEGOTIATION_MISMATCH_RETRY_DELAY_SEC);
+    for (int i = 0; i < NEGOTIATION_MISMATCH_RETRY_DELAY_SEC && g_running; ++i) {
+        sleep(1);
+    }
+}
 
 static const char* gs_rc_name(int rc) {
     switch (rc) {
@@ -989,6 +1003,7 @@ static int run_stream_command(const StreamOptions* opt) {
         connection_callbacks_set_fatal_code(NULL);
         if (fatal_code != WORKER_FATAL_NONE) {
             fprintf(stderr, "fatal_code=%d, stopping worker\n", fatal_code);
+            delay_before_fatal_exit_if_needed(fatal_code);
             return 100 + fatal_code;
         }
         return 6;
@@ -1033,6 +1048,9 @@ static int run_stream_command(const StreamOptions* opt) {
 
     connection_callbacks_set_fatal_code(NULL);
     LiStopConnection();
+    if (exit_code == 100 + WORKER_FATAL_NEGOTIATION_MISMATCH) {
+        delay_before_fatal_exit_if_needed(WORKER_FATAL_NEGOTIATION_MISMATCH);
+    }
 
     return exit_code;
 }
