@@ -46,9 +46,10 @@ Docker / Sunshine
 - `mlctl.sh up/restart` 创建 worker 容器时默认设置 Docker 日志轮转：`ML_WORKER_LOG_MAX_SIZE=20m`、`ML_WORKER_LOG_MAX_FILE=2`
 - `192.168.11.31` 已重建 20 个 `mlw-worker_*` 容器，验证均为 `negotiated=hevc_rext8_444(0x400) yuv444=1`
 - `192.168.11.31` 本地 `ml-worker:latest` 已更新到 `sha256:db3eb40696018b906ff6f2f38ef565d11656bc3cafa6212c09c436664437ee5e`
-- GHCR 发布状态：执行 `docker push ghcr.io/962125862/myworkspace/ml-worker:latest` 时返回 `unauthorized: unauthenticated`，说明当前机器 GHCR token 无效或缺少 `write:packages` 权限；registry 尚未更新
+- GHCR `ghcr.io/962125862/myworkspace/ml-worker:latest` 已更新；push digest 为 `sha256:76f388cddc9a4d549cdc77a041a285cd7c3d20f0298809d820a5464c23c6cf9e`，manifest config digest 为 `sha256:db3eb40696018b906ff6f2f38ef565d11656bc3cafa6212c09c436664437ee5e`
+- GHCR 登录凭据已在 `192.168.11.31` 上执行 `docker logout ghcr.io` 清理
 
-GHCR 发布命令（登录修复后执行）：
+GHCR 发布命令：
 
 ```bash
 docker login ghcr.io
@@ -207,4 +208,4 @@ docker push ghcr.io/962125862/myworkspace/ml-worker:latest
 ---
 
 Doc-Version: 0.3.1
-Repo-Rev: 1738251
+Repo-Rev: 04371cf
