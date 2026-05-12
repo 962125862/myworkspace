@@ -9,6 +9,8 @@ DEFAULT_IMAGE="${ML_IMAGE:-ml-worker:latest}"
 DEFAULT_WORKER_BIN="${ML_BIN:-}"
 DOCKER_USER="${ML_DOCKER_USER:-$(id -u):$(id -g)}"
 CONTROL_PORT_BASE="${ML_CONTROL_PORT_BASE:-30000}"
+WORKER_LOG_MAX_SIZE="${ML_WORKER_LOG_MAX_SIZE:-20m}"
+WORKER_LOG_MAX_FILE="${ML_WORKER_LOG_MAX_FILE:-2}"
 
 log() {
     printf '[mlctl] %s\n' "$*"
@@ -718,6 +720,9 @@ up_worker() {
         --restart unless-stopped \
         --name "$CONTAINER_NAME" \
         --label "ml.worker=$NAME" \
+        --log-driver json-file \
+        --log-opt "max-size=$WORKER_LOG_MAX_SIZE" \
+        --log-opt "max-file=$WORKER_LOG_MAX_FILE" \
         --network host \
         --ipc host \
         -v "$KEY_DIR:/keys" \
@@ -1189,6 +1194,7 @@ usage() {
 - stop-soft : 只 stop 容器但不删除（下次 ensure-up 可快速 start）
 - logs      : 查看 stream 容器日志
 - delete    : 删除 worker 配置，并可选删除数据目录
+- worker Docker 日志默认轮转为 `20m * 2`，可用 `ML_WORKER_LOG_MAX_SIZE` / `ML_WORKER_LOG_MAX_FILE` 调整
 
 输出方式:
 - 使用 TCP 推流（替代了原来的共享内存）
