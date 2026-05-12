@@ -155,6 +155,8 @@ ssh 192.168.11.31 'docker logs --since 60s <container> 2>&1 | tail -n 120'
 - `tcp_sender: connect failed`
 - `tcp_sender: attempting to reconnect`
 
+其中 `fatal_code=8` 表示请求的视频格式和 Sunshine/Limelight 实际协商结果不一致，例如配置要求 `HEVC 4:4:4` 但实际退成 `HEVC 4:2:0`。`ml_worker` 会先等待 `60s` 再退出，让 Docker 自动重启最多按分钟级重试，避免协商异常时快速刷日志。
+
 ### 4.3 `control socket open failed`
 
 当前这类问题最常见来源是控制口冲突。
@@ -264,5 +266,5 @@ ssh 192.168.11.31 'pid=$(systemctl show -p MainPID --value stream_server_9000.se
 
 ---
 
-Doc-Version: 1.0.1
-Repo-Rev: be36af2
+Doc-Version: 1.0.2
+Repo-Rev: 8fde2ae
