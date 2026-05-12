@@ -24,12 +24,37 @@ Docker / Sunshine
 当前正式链路的默认行为：
 
 - `ml_worker` 默认请求 `HEVC 4:4:4 8-bit`
+- `ml_worker` 会校验 Sunshine/Limelight 实际协商结果；如果配置要求 `HEVC 4:4:4` 但实际退成 `HEVC 4:2:0`，会以 `fatal_code=8` 退出
+- `fatal_code=8` 退出前会等待 `60s`，让 Docker 自动重启按分钟级重试，避免快速刷日志
 - `stream_server` 在 `auto` 模式下对 `HEVC444` 优先走 Intel VA-API
 - `GET_LATEST_BGR` 统一走解码后适配层，不再由 `zmq_bridge` 自己维护多套源格式分支
 - 常见快路径优先走 `libyuv`
 - 本机 `HEVC444 + Intel` 下载到 CPU 后当前通常落到 `VUYX`
 - `VUYX -> BGR24` 现在已有专门快路径，并带 x86 SIMD 分发
 - `STREAM_DEFER_HW_DOWNLOAD=on` 仍保持为默认值，取图时才做 `GPU -> CPU` 下载
+- `mlctl.sh` 创建 worker 容器时默认启用 Docker `json-file` 日志轮转：`max-size=20m`、`max-file=2`
+
+## 修改记录
+
+### 2026-05-12
+
+- 新增 `GET_LATEST_BGR` ROI 输出：请求可带 `roi: {"x": ..., "y": ..., "w": ..., "h": ...}`，返回 tight `BGR24` ROI payload，用于降低 ZMQ/IPC 带宽；不改变解码和整帧转换路径
+- 移除 helper 客户端对 `request_new` 的依赖；该字段保留为 legacy ignored
+- 修复 `ml_worker` 协商元数据不真实的问题：`stream_start` 的 `codec/chroma/bitdepth` 现在来自实际 negotiated videoFormat，而不是配置请求值
+- 新增协商降级保护：请求 `HEVC 4:4:4` 但实际协商成 `HEVC 4:2:0` 等不一致结果时，`ml_worker` 以 `fatal_code=8` 失败，不再静默发送坏流
+- `fatal_code=8` 退出前增加 `60s` sleep；配合 Docker `restart: unless-stopped`，异常状态下最多约一分钟重试一次
+- `mlctl.sh up/restart` 创建 worker 容器时默认设置 Docker 日志轮转：`ML_WORKER_LOG_MAX_SIZE=20m`、`ML_WORKER_LOG_MAX_FILE=2`
+- `192.168.11.31` 已重建 20 个 `mlw-worker_*` 容器，验证均为 `negotiated=hevc_rext8_444(0x400) yuv444=1`
+- `192.168.11.31` 本地 `ml-worker:latest` 已更新到 `sha256:db3eb40696018b906ff6f2f38ef565d11656bc3cafa6212c09c436664437ee5e`
+- GHCR 发布状态：执行 `docker push ghcr.io/962125862/myworkspace/ml-worker:latest` 时返回 `unauthorized: unauthenticated`，说明当前机器 GHCR token 无效或缺少 `write:packages` 权限；registry 尚未更新
+
+GHCR 发布命令（登录修复后执行）：
+
+```bash
+docker login ghcr.io
+docker tag ml-worker:latest ghcr.io/962125862/myworkspace/ml-worker:latest
+docker push ghcr.io/962125862/myworkspace/ml-worker:latest
+```
 
 ## 已完成
 
@@ -181,5 +206,5 @@ Docker / Sunshine
 
 ---
 
-Doc-Version: 0.3.0
-Repo-Rev: 0dcf925
+Doc-Version: 0.3.1
+Repo-Rev: 9d87da6
