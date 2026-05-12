@@ -88,6 +88,12 @@ ssh 192.168.11.31 'docker logs --since 30s mlw-worker_170 2>&1 | tail -n 80'
 - `streaming started, press Ctrl+C to stop`
 - 持续的 `[video] fps=... state=CONNECTED`
 
+日志保留：
+
+- `mlctl.sh` 创建的 `mlw-worker_*` 容器默认使用 Docker `json-file` 日志轮转
+- 默认 `max-size=20m`、`max-file=2`
+- 修改为其它大小后，需要用 `./deploy/mlctl.sh restart <worker>` 重建容器才会生效
+
 ### 2.4 看全部容器状态
 
 ```bash
@@ -165,5 +171,5 @@ cd /home/gejun/work/my_ml_work
 
 ---
 
-Doc-Version: 1.0.0
-Repo-Rev: fcc4282
+Doc-Version: 1.0.1
+Repo-Rev: be36af2

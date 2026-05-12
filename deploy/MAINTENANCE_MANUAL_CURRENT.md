@@ -65,6 +65,26 @@ ssh 192.168.11.31 'systemctl show -p MainPID,SubState,ExecMainStartTimestamp str
 ssh 192.168.11.31 'docker logs --since 60s mlw-worker_170 2>&1 | tail -n 120'
 ```
 
+### 2.4 Docker 日志保留策略
+
+主链路 worker 容器由 `deploy/mlctl.sh` 创建时默认启用 Docker `json-file` 日志轮转：
+
+- `max-size=20m`
+- `max-file=2`
+- 单个 `mlw-worker_*` 容器最多约保留 `40MB`
+
+如果要调小：
+
+```bash
+ML_WORKER_LOG_MAX_SIZE=10m ML_WORKER_LOG_MAX_FILE=2 ./deploy/mlctl.sh restart worker_170
+```
+
+注意：
+
+- Docker LogConfig 只在创建容器时生效
+- 单纯 `docker restart` 不会更新日志轮转参数
+- 需要用 `./deploy/mlctl.sh restart <worker>` 删除旧容器并重建
+
 ## 3. 巡检脚本判定逻辑
 
 当前脚本的默认规则是：
@@ -244,5 +264,5 @@ ssh 192.168.11.31 'pid=$(systemctl show -p MainPID --value stream_server_9000.se
 
 ---
 
-Doc-Version: 1.0.0
-Repo-Rev: fcc4282
+Doc-Version: 1.0.1
+Repo-Rev: be36af2

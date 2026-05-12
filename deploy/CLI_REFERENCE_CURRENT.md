@@ -230,6 +230,14 @@
 - `./deploy/mlctl.sh restart <worker>`
 - `./deploy/mlctl.sh logs <worker>`
 
+worker Docker 日志轮转：
+
+- `mlctl.sh up/restart` 创建容器时默认使用 Docker `json-file` 日志轮转
+- 默认 `ML_WORKER_LOG_MAX_SIZE=20m`
+- 默认 `ML_WORKER_LOG_MAX_FILE=2`
+- 单个 `mlw-worker_*` 容器最多约保留 `40MB` Docker 日志
+- 已存在容器需要 `./deploy/mlctl.sh restart <worker>` 重建后才会应用新的 LogConfig
+
 当前批量模式：
 
 - `batch-add`：生成 `worker_sN`，默认 `STREAM_ID=N`、`CONTROL_PORT=30000+N`

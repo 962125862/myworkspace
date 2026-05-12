@@ -91,6 +91,18 @@ cd /home/gejun/work/my_ml_work
 ./deploy/mlctl.sh logs worker_150
 ```
 
+日志轮转：
+
+- `mlctl.sh up/restart` 默认给 worker 容器加 Docker `json-file` 日志轮转
+- 默认 `max-size=20m`、`max-file=2`
+- 可临时覆盖：
+
+```bash
+ML_WORKER_LOG_MAX_SIZE=10m ML_WORKER_LOG_MAX_FILE=2 ./deploy/mlctl.sh restart worker_150
+```
+
+- Docker LogConfig 只在创建容器时生效；修改参数后需要 `restart` 让 `mlctl` 删除旧容器并重建
+
 ## 4. 当前直接运行命令
 
 ### 4.1 查看 192.168.11.31 上的正式 stream_server 服务
