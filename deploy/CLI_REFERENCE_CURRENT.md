@@ -290,6 +290,7 @@ worker Docker 日志轮转：
 
 ## 5. 相关文档
 
+- 运维入口：`deploy/OPERATIONS_CURRENT.md`
 - 链路说明：`deploy/CHAIN_ml_worker_stream_server.md`
 - 架构说明：`deploy/ARCHITECTURE_CURRENT.md`
 - benchmark：`deploy/BENCHMARK_stream_server_2026-04-13.md`

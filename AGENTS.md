@@ -11,10 +11,10 @@ Primary runbooks live in `deploy/` (see below). Prefer following those docs over
 ## Key Docs
 
 - Remote agent quickstart: `deploy/RUNBOOK_strem_agent.md`
+- Current main-chain operations: `deploy/OPERATIONS_CURRENT.md`
 - Main `ml_worker -> stream_server` chain: `deploy/CHAIN_ml_worker_stream_server.md`
 - Current architecture: `deploy/ARCHITECTURE_CURRENT.md`
 - Current CLI/runtime flags: `deploy/CLI_REFERENCE_CURRENT.md`
-- Current build/deploy commands: `deploy/BUILD_DEPLOY_COMMANDS_CURRENT.md`
 - Current benchmark note: `deploy/BENCHMARK_stream_server_2026-04-13.md`
 - Current project status/issues: `PROGRESS.md`
 

@@ -57,6 +57,16 @@ docker tag ml-worker:latest ghcr.io/962125862/myworkspace/ml-worker:latest
 docker push ghcr.io/962125862/myworkspace/ml-worker:latest
 ```
 
+### 2026-05-13
+
+- 新增统一运维入口 `deploy/OPERATIONS_CURRENT.md`
+- 将 `deploy/USAGE_MANUAL_CURRENT.md`、`deploy/MAINTENANCE_MANUAL_CURRENT.md`、`deploy/BUILD_DEPLOY_COMMANDS_CURRENT.md` 收敛为短跳转，具体内容以 `deploy/OPERATIONS_CURRENT.md` 为准
+- 删除已落地且内容过期的历史计划文档：
+  - `plan_444_v1.md`
+  - `deploy/PLAN_strem_agent.md`
+  - `run_docker_config.md`
+- 更新 `README.md` 和 `AGENTS.md` 的文档入口，区分当前主链路与代理/按需启动链路
+
 ## 已完成
 
 ### 1. 自动后端选择收敛
@@ -207,5 +217,5 @@ docker push ghcr.io/962125862/myworkspace/ml-worker:latest
 
 ---
 
-Doc-Version: 0.3.1
-Repo-Rev: e132e65
+Doc-Version: 0.3.2
+Repo-Rev: TBD
