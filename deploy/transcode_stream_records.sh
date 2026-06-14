@@ -11,6 +11,8 @@ OUTPUT_FPS="${STREAM_TRANSCODE_OUTPUT_FPS:-10}"
 BITRATE="${STREAM_TRANSCODE_BITRATE:-1200k}"
 ENCODER="${STREAM_TRANSCODE_ENCODER:-hevc_nvenc}"
 VAAPI_DEVICE="${STREAM_TRANSCODE_VAAPI_DEVICE:-/dev/dri/renderD128}"
+VAAPI_FILTER="${STREAM_TRANSCODE_VAAPI_FILTER-scale_vaapi=format=nv12}"
+VAAPI_PROFILE="${STREAM_TRANSCODE_VAAPI_PROFILE:-}"
 BATCH_SIZE="${STREAM_TRANSCODE_BATCH_SIZE:-10}"
 PARALLEL="${STREAM_TRANSCODE_PARALLEL:-1}"
 DELETE_SOURCE="${STREAM_TRANSCODE_DELETE_SOURCE:-0}"
@@ -34,6 +36,8 @@ env:
   STREAM_TRANSCODE_BITRATE=1200k
   STREAM_TRANSCODE_ENCODER=hevc_nvenc
   STREAM_TRANSCODE_VAAPI_DEVICE=/dev/dri/renderD128
+  STREAM_TRANSCODE_VAAPI_FILTER=scale_vaapi=format=nv12
+  STREAM_TRANSCODE_VAAPI_PROFILE=
   STREAM_TRANSCODE_BATCH_SIZE=10
   STREAM_TRANSCODE_PARALLEL=1
   STREAM_TRANSCODE_DELETE_SOURCE=0
@@ -126,9 +130,19 @@ transcode_batch() {
             -hwaccel_output_format vaapi
             -r "$INPUT_FPS" -f "$demuxer" -i pipe:0
             -an
-            -vf "scale_vaapi=format=nv12"
+        )
+        if [[ -n "$VAAPI_FILTER" ]]; then
+            ffmpeg_args+=(-vf "$VAAPI_FILTER")
+        fi
+        ffmpeg_args+=(
             -r "$OUTPUT_FPS"
-            -c:v "$ENCODER" -b:v "$BITRATE" -tag:v hvc1 -movflags +faststart
+            -c:v "$ENCODER"
+        )
+        if [[ -n "$VAAPI_PROFILE" ]]; then
+            ffmpeg_args+=(-profile:v "$VAAPI_PROFILE")
+        fi
+        ffmpeg_args+=(
+            -b:v "$BITRATE" -tag:v hvc1 -movflags +faststart
             -f mp4
             "$tmp"
         )
