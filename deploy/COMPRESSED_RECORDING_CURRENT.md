@@ -213,7 +213,7 @@ sudo systemctl enable --now hevc-store-mount.timer
 - 输出 `/mnt/hevc_store_35/transcoded/sXX/*.mp4`，实际落在 35 的 `/home/gejun/hevc_store/transcoded/sXX/*.mp4`。
 - 输入按 `30fps` 解释，输出降到 `10fps`。
 - 888 使用 Intel VAAPI，编码器 `hevc_vaapi`，码率 `1200k`，输出 `HEVC Main / yuv420p`。
-- 当前并行度 `STREAM_TRANSCODE_PARALLEL=2`，一次最多同时跑 2 个 ffmpeg batch，给 VAAPI 和 NFS 留余量。
+- 当前并行度 `STREAM_TRANSCODE_PARALLEL=1`，一次只跑 1 个 ffmpeg batch；2026-06-14 排查 PVE 宿主机异常后从 2 降到 1，避免 888 转码持续顶满宿主机 iGPU。
 - 合并使用裸流字节拼接输入给 ffmpeg，不创建大 merged 中间文件。
 - 输出先写 `.mp4.tmp`，成功后 rename 成 `.mp4`。
 - 成功后给 batch 内每个源文件写 `.transcoded` 标记。
@@ -319,7 +319,7 @@ Environment=STREAM_TRANSCODE_BITRATE=1200k
 Environment=STREAM_TRANSCODE_ENCODER=hevc_vaapi
 Environment=STREAM_TRANSCODE_VAAPI_DEVICE=/dev/dri/renderD128
 Environment=STREAM_TRANSCODE_BATCH_SIZE=5
-Environment=STREAM_TRANSCODE_PARALLEL=2
+Environment=STREAM_TRANSCODE_PARALLEL=1
 Environment=STREAM_TRANSCODE_DELETE_SOURCE=1
 Environment=STREAM_TRANSCODE_MAX_BATCHES=0
 ```
@@ -436,6 +436,12 @@ Environment=HEVC_STORE_PRUNE_TMP_MAX_AGE_MIN=360
 - 转码过程中 `35` 掉线：当前 ffmpeg 失败，`.mp4.tmp` 不会 rename 成正式 MP4，raw 不会删除；恢复后下一轮重试。
 - `35` 只做 NFS 和容量清理；不参与转码计算。
 - `888` 重启后，mount timer 和 transcode timer 自动恢复。
+
+## 2026-06-14 PVE 排障记录
+
+- `192.168.11.10` 宿主机上一轮日志在 `2026-06-14 15:40:42 CST` 后中断，888 容器日志在 `15:45 CST` 开始两路 VAAPI 转码后停止；宿主机日志没有 OOM、panic、i915 GPU hang 或磁盘 I/O 错误，表现更接近硬锁死、断电或强制重启前 journald 未能落盘。
+- 当前复测时，两路 ffmpeg 会把宿主机 iGPU `Render/3D` 压到约 90-99%，因此 888 已调整为 `STREAM_TRANSCODE_PARALLEL=1`。
+- 后续启动失败是独立问题：宿主机 `/etc/fstab` 曾包含 `UUID=1be3ca70-8aee-46e8-aaa1-f6fca853bfff /mnt/ssd-vmdk ext4 defaults,noatime 0 2`，但当前 `blkid` 已不存在该 UUID，systemd 等待该本地盘超时后进入 emergency mode。该行已注释；若以后恢复这个挂载，必须修正 UUID，并加 `nofail,x-systemd.device-timeout=10s`。
 
 ## 故障隔离
 
