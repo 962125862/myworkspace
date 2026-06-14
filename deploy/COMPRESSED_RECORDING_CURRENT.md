@@ -218,6 +218,7 @@ sudo systemctl enable --now hevc-store-mount.timer
 - 输出先写 `.mp4.tmp`，成功后 rename 成 `.mp4`。
 - 成功后给 batch 内每个源文件写 `.transcoded` 标记。
 - 当前 `STREAM_TRANSCODE_DELETE_SOURCE=1`，转码成功后删除 batch 内 raw 源文件和同步标记，避免 35 空间持续增长。
+- 888 与 31 手动 helper 共享 `/mnt/hevc_store_35/.claims` batch claim 目录，避免同时处理同一批 raw。
 
 888 上 timer 启用：
 
@@ -324,6 +325,9 @@ Environment=STREAM_TRANSCODE_BATCH_SIZE=5
 Environment=STREAM_TRANSCODE_PARALLEL=3
 Environment=STREAM_TRANSCODE_DELETE_SOURCE=1
 Environment=STREAM_TRANSCODE_MAX_BATCHES=0
+Environment=STREAM_TRANSCODE_CLAIM_DIR=/mnt/hevc_store_35/.claims
+Environment=STREAM_TRANSCODE_CLAIM_MAX_AGE_SEC=1800
+Environment=STREAM_TRANSCODE_WORKER_NAME=888-vaapi
 ```
 
 转码输出：
@@ -339,8 +343,38 @@ Environment=STREAM_TRANSCODE_MAX_BATCHES=0
 - 输出 `HEVC Rext / yuv444p / 10fps / 1200k`。
 - 并行 3 路，主要使用 iGPU Video engine；不做 `scale_vaapi=format=nv12`。
 - 成功后删除 batch 内 raw 源文件、`.synced` 和 `.transcoded` 标记。
+- batch 开始前会在 `/mnt/hevc_store_35/.claims` 创建 claim；31 手动 helper 看到已 claim 的 batch 会跳过，避免重复处理；同机旧 pid 不存在或 claim 超过 30 分钟时会自动清理。
 - NFS 未挂载时直接跳过，等待 mount timer 后续恢复。
 - 35 中途掉线时当前 `.mp4.tmp` 失败，raw 不会误删，恢复后重试。
+
+## 31 手动候补转码
+
+31 默认不做二次转码，避免占用 T10 给 YOLO/Paddle 使用。需要手动帮忙消化 backlog 时，在 31 上运行：
+
+```bash
+/home/gejun/bin/run_31_transcode_helper.sh
+```
+
+参数：
+
+```bash
+/home/gejun/bin/run_31_transcode_helper.sh      # 默认，一直处理到没有可处理 batch
+/home/gejun/bin/run_31_transcode_helper.sh 0    # 一直处理到没有可处理 batch
+/home/gejun/bin/run_31_transcode_helper.sh 1    # 只处理 1 个 batch
+/home/gejun/bin/run_31_transcode_helper.sh 10   # 处理 10 个 batch
+```
+
+行为：
+
+- 不检测 NVIDIA 空闲状态；执行脚本即直接跑。
+- 使用 31 上的 Tesla T10，编码器 `hevc_nvenc`。
+- 输入 `/mnt/hevc_store_35/raw`，输出 `/mnt/hevc_store_35/transcoded`。
+- 输出 `HEVC Rext / yuv444p / 10fps / 1200k`。
+- 默认并行度 `1`；默认不限制 batch 数，会持续扫描并转码，直到当前没有能 claim 到的完整 batch 后退出。
+- 成功后删除 batch 内 raw 源文件、`.synced` 和 `.transcoded` 标记。
+- 使用同一个 `/mnt/hevc_store_35/.claims` claim 目录，和 888 协调，不重复处理同一批 raw。
+- 同机旧 pid 不存在或 claim 超过 30 分钟时，会清理旧 claim 后继续尝试处理。
+- 2026-06-14 测试：31 单路 5 段 batch 约 `942.9s` 视频耗时 `17.77s`，约 `53x` 实时；测试期间 T10 `DEC` 约 `83-100%`，`ENC` 约 `68-82%`，`SM` 约 `7-8%`。
 
 ## 35 容量清理
 

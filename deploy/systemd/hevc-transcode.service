@@ -25,4 +25,7 @@ Environment=STREAM_TRANSCODE_BATCH_SIZE=5
 Environment=STREAM_TRANSCODE_PARALLEL=3
 Environment=STREAM_TRANSCODE_DELETE_SOURCE=1
 Environment=STREAM_TRANSCODE_MAX_BATCHES=0
+Environment=STREAM_TRANSCODE_CLAIM_DIR=/mnt/hevc_store_35/.claims
+Environment=STREAM_TRANSCODE_CLAIM_MAX_AGE_SEC=1800
+Environment=STREAM_TRANSCODE_WORKER_NAME=888-vaapi
 ExecStart=/home/gejun/bin/transcode_stream_records.sh

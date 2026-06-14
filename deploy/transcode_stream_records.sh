@@ -13,12 +13,18 @@ ENCODER="${STREAM_TRANSCODE_ENCODER:-hevc_nvenc}"
 VAAPI_DEVICE="${STREAM_TRANSCODE_VAAPI_DEVICE:-/dev/dri/renderD128}"
 VAAPI_FILTER="${STREAM_TRANSCODE_VAAPI_FILTER-scale_vaapi=format=nv12}"
 VAAPI_PROFILE="${STREAM_TRANSCODE_VAAPI_PROFILE:-}"
+NVENC_HWACCEL="${STREAM_TRANSCODE_NVENC_HWACCEL:-cuda}"
+NVENC_FILTER="${STREAM_TRANSCODE_NVENC_FILTER:-}"
+NVENC_PROFILE="${STREAM_TRANSCODE_NVENC_PROFILE:-}"
 BATCH_SIZE="${STREAM_TRANSCODE_BATCH_SIZE:-10}"
 PARALLEL="${STREAM_TRANSCODE_PARALLEL:-1}"
 DELETE_SOURCE="${STREAM_TRANSCODE_DELETE_SOURCE:-0}"
 MAX_BATCHES="${STREAM_TRANSCODE_MAX_BATCHES:-0}"
 DRY_RUN="${STREAM_TRANSCODE_DRY_RUN:-0}"
 LOCK_FILE="${STREAM_TRANSCODE_LOCK_FILE:-/tmp/transcode_stream_records.lock}"
+CLAIM_DIR="${STREAM_TRANSCODE_CLAIM_DIR:-}"
+CLAIM_MAX_AGE_SEC="${STREAM_TRANSCODE_CLAIM_MAX_AGE_SEC:-1800}"
+WORKER_NAME="${STREAM_TRANSCODE_WORKER_NAME:-$(hostname -s 2>/dev/null || hostname)}"
 
 usage() {
     cat <<'EOF'
@@ -38,11 +44,17 @@ env:
   STREAM_TRANSCODE_VAAPI_DEVICE=/dev/dri/renderD128
   STREAM_TRANSCODE_VAAPI_FILTER=scale_vaapi=format=nv12
   STREAM_TRANSCODE_VAAPI_PROFILE=
+  STREAM_TRANSCODE_NVENC_HWACCEL=cuda
+  STREAM_TRANSCODE_NVENC_FILTER=
+  STREAM_TRANSCODE_NVENC_PROFILE=
   STREAM_TRANSCODE_BATCH_SIZE=10
   STREAM_TRANSCODE_PARALLEL=1
   STREAM_TRANSCODE_DELETE_SOURCE=0
   STREAM_TRANSCODE_MAX_BATCHES=0
   STREAM_TRANSCODE_DRY_RUN=0
+  STREAM_TRANSCODE_CLAIM_DIR=
+  STREAM_TRANSCODE_CLAIM_MAX_AGE_SEC=1800
+  STREAM_TRANSCODE_WORKER_NAME=$(hostname -s)
 
 behavior:
   - scans closed *.h264 / *.hevc files under per-stream directories
@@ -52,6 +64,7 @@ behavior:
   - marks every source in a successful batch as *.transcoded
   - runs up to STREAM_TRANSCODE_PARALLEL ffmpeg batches at the same time
   - uses flock so timer/manual runs cannot overlap
+  - optionally uses STREAM_TRANSCODE_CLAIM_DIR for cross-host batch claims
 EOF
 }
 
@@ -81,7 +94,108 @@ mark_batch_done() {
     done
 }
 
+batch_name() {
+    local stream_dir="$1"
+    shift
+    local files=("$@")
+    local first last stream_name first_base last_base
+
+    first="${files[0]}"
+    last="${files[$((${#files[@]} - 1))]}"
+    stream_name="$(basename "$stream_dir")"
+    first_base="$(basename "${first%.*}")"
+    last_base="$(basename "${last%.*}")"
+    printf '%s_%s__%s' "$stream_name" "$first_base" "$last_base"
+}
+
+claim_batch() {
+    local stream_dir="$1"
+    shift
+    local claim name
+
+    if [[ -z "$CLAIM_DIR" || "$DRY_RUN" != "0" ]]; then
+        printf '\n'
+        return 0
+    fi
+
+    name="$(batch_name "$stream_dir" "$@")"
+    mkdir -p "$CLAIM_DIR"
+    claim="$CLAIM_DIR/$name.claim"
+
+    if mkdir "$claim" 2>/dev/null; then
+        {
+            printf 'worker=%s\n' "$WORKER_NAME"
+            printf 'host=%s\n' "$(hostname -f 2>/dev/null || hostname)"
+            printf 'pid=%s\n' "$$"
+            printf 'time=%s\n' "$(date -Is)"
+        } >"$claim/owner"
+        printf '%s\n' "$claim"
+        return 0
+    fi
+
+    if [[ -d "$claim" ]] && claim_is_stale "$claim"; then
+        err "remove stale claim batch=$name owner=$(tr '\n' ' ' <"$claim/owner" 2>/dev/null || true)"
+        rm -rf -- "$claim"
+        if mkdir "$claim" 2>/dev/null; then
+            {
+                printf 'worker=%s\n' "$WORKER_NAME"
+                printf 'host=%s\n' "$(hostname -f 2>/dev/null || hostname)"
+                printf 'pid=%s\n' "$$"
+                printf 'time=%s\n' "$(date -Is)"
+            } >"$claim/owner"
+            printf '%s\n' "$claim"
+            return 0
+        fi
+    fi
+
+    err "skip claimed batch=$name owner=$(tr '\n' ' ' <"$claim/owner" 2>/dev/null || true)"
+    return 1
+}
+
+release_claim() {
+    local claim="${1:-}"
+    if [[ -n "$claim" && -d "$claim" ]]; then
+        rm -rf -- "$claim"
+    fi
+}
+
+owner_value() {
+    local claim="$1"
+    local key="$2"
+    awk -F= -v k="$key" '$1 == k {print substr($0, length(k) + 2); exit}' "$claim/owner" 2>/dev/null || true
+}
+
+claim_is_stale() {
+    local claim="$1"
+    local owner_host owner_pid this_host mtime now age
+
+    owner_host="$(owner_value "$claim" host)"
+    owner_pid="$(owner_value "$claim" pid)"
+    this_host="$(hostname -f 2>/dev/null || hostname)"
+
+    if [[ -n "$owner_host" && "$owner_host" == "$this_host" && "$owner_pid" =~ ^[0-9]+$ ]]; then
+        if ! kill -0 "$owner_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    if is_uint "$CLAIM_MAX_AGE_SEC" && (( CLAIM_MAX_AGE_SEC > 0 )); then
+        mtime="$(stat -c %Y "$claim" 2>/dev/null || printf '0')"
+        now="$(date +%s)"
+        if [[ "$mtime" =~ ^[0-9]+$ ]]; then
+            age=$((now - mtime))
+            if (( age > CLAIM_MAX_AGE_SEC )); then
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
 transcode_batch() {
+    local claim_path="$1"
+    shift
     local stream_dir="$1"
     shift
     local files=("$@")
@@ -89,6 +203,7 @@ transcode_batch() {
     local -a ffmpeg_args=()
 
     if (( ${#files[@]} == 0 )); then
+        release_claim "$claim_path"
         return 0
     fi
 
@@ -108,12 +223,14 @@ transcode_batch() {
 
     if [[ -s "$out" ]]; then
         mark_batch_done "${files[@]}"
+        release_claim "$claim_path"
         return 0
     fi
 
     if [[ "$DRY_RUN" != "0" ]]; then
         printf 'dry-run batch stream=%s count=%s -> %s\n' "$stream_name" "${#files[@]}" "$out"
         printf 'dry-run first=%s last=%s\n' "$first" "$last"
+        release_claim "$claim_path"
         return 0
     fi
 
@@ -146,6 +263,35 @@ transcode_batch() {
             -f mp4
             "$tmp"
         )
+    elif [[ "$ENCODER" == *_nvenc ]]; then
+        ffmpeg_args=(
+            -hide_banner -y
+        )
+        if [[ "$NVENC_HWACCEL" != "0" && -n "$NVENC_HWACCEL" ]]; then
+            ffmpeg_args+=(
+                -hwaccel "$NVENC_HWACCEL"
+                -hwaccel_output_format "$NVENC_HWACCEL"
+            )
+        fi
+        ffmpeg_args+=(
+            -r "$INPUT_FPS" -f "$demuxer" -i pipe:0
+            -an
+        )
+        if [[ -n "$NVENC_FILTER" ]]; then
+            ffmpeg_args+=(-vf "$NVENC_FILTER")
+        fi
+        ffmpeg_args+=(
+            -r "$OUTPUT_FPS"
+            -c:v "$ENCODER"
+        )
+        if [[ -n "$NVENC_PROFILE" ]]; then
+            ffmpeg_args+=(-profile:v "$NVENC_PROFILE")
+        fi
+        ffmpeg_args+=(
+            -b:v "$BITRATE" -tag:v hvc1 -movflags +faststart
+            -f mp4
+            "$tmp"
+        )
     else
         ffmpeg_args=(
             -hide_banner -y
@@ -161,8 +307,10 @@ transcode_batch() {
         mv -f -- "$tmp" "$out"
         mark_batch_done "${files[@]}"
         printf '[%s] done %s\n' "$(date -Is)" "$out" | tee -a "$log"
+        release_claim "$claim_path"
     else
         rm -f -- "$tmp"
+        release_claim "$claim_path"
         err "transcode failed: batch first=$first last=$last (see $log)"
         return 1
     fi
@@ -199,13 +347,22 @@ wait_for_all_jobs() {
 }
 
 launch_transcode_batch() {
+    local claim_path
+
+    if (( PARALLEL > 1 )); then
+        wait_for_available_slot
+    fi
+
+    if ! claim_path="$(claim_batch "$@")"; then
+        return 1
+    fi
+
     if (( PARALLEL <= 1 )); then
-        transcode_batch "$@" || failed_batches=$((failed_batches + 1))
+        transcode_batch "$claim_path" "$@" || failed_batches=$((failed_batches + 1))
         return 0
     fi
 
-    wait_for_available_slot
-    transcode_batch "$@" &
+    transcode_batch "$claim_path" "$@" &
     active_jobs=$((active_jobs + 1))
 }
 
@@ -225,10 +382,11 @@ process_stream_dir() {
 
         batch+=("$f")
         if (( ${#batch[@]} == BATCH_SIZE )); then
-            launch_transcode_batch "$stream_dir" "${batch[@]}"
-            processed_batches=$((processed_batches + 1))
-            if is_uint "$MAX_BATCHES" && (( MAX_BATCHES > 0 && processed_batches >= MAX_BATCHES )); then
-                return 0
+            if launch_transcode_batch "$stream_dir" "${batch[@]}"; then
+                processed_batches=$((processed_batches + 1))
+                if is_uint "$MAX_BATCHES" && (( MAX_BATCHES > 0 && processed_batches >= MAX_BATCHES )); then
+                    return 0
+                fi
             fi
             batch=()
         fi
