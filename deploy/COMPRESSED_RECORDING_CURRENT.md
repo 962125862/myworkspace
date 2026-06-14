@@ -370,7 +370,7 @@ Environment=STREAM_TRANSCODE_WORKER_NAME=888-vaapi
 - 使用 31 上的 Tesla T10，编码器 `hevc_nvenc`。
 - 输入 `/mnt/hevc_store_35/raw`，输出 `/mnt/hevc_store_35/transcoded`。
 - 输出 `HEVC Rext / yuv444p / 10fps / 1200k`。
-- 默认并行度 `1`；默认不限制 batch 数，会持续扫描并转码，直到当前没有能 claim 到的完整 batch 后退出。
+- 默认并行度 `1`；每轮只 claim 1 个 batch，转完后重新扫描 raw 根目录，直到当前没有能 claim 到的完整 batch 后退出。
 - 成功后删除 batch 内 raw 源文件、`.synced` 和 `.transcoded` 标记。
 - 使用同一个 `/mnt/hevc_store_35/.claims` claim 目录，和 888 协调，不重复处理同一批 raw。
 - 同机旧 pid 不存在或 claim 超过 30 分钟时，会清理旧 claim 后继续尝试处理。

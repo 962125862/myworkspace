@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAX_BATCHES="${1:-0}"
+REQUESTED_MAX_BATCHES="${1:-0}"
 
-if [[ "${MAX_BATCHES}" == "-h" || "${MAX_BATCHES}" == "--help" ]]; then
+if [[ "${REQUESTED_MAX_BATCHES}" == "-h" || "${REQUESTED_MAX_BATCHES}" == "--help" ]]; then
     cat <<'EOF'
 usage:
   run_31_transcode_helper.sh [max_batches]
@@ -19,7 +19,7 @@ EOF
     exit 0
 fi
 
-if [[ ! "${MAX_BATCHES}" =~ ^[0-9]+$ ]]; then
+if [[ ! "${REQUESTED_MAX_BATCHES}" =~ ^[0-9]+$ ]]; then
     echo "max_batches must be an unsigned integer" >&2
     exit 2
 fi
@@ -39,10 +39,40 @@ export STREAM_TRANSCODE_NVENC_PROFILE="${STREAM_TRANSCODE_NVENC_PROFILE:-rext}"
 export STREAM_TRANSCODE_BATCH_SIZE="${STREAM_TRANSCODE_BATCH_SIZE:-5}"
 export STREAM_TRANSCODE_PARALLEL="${STREAM_TRANSCODE_PARALLEL:-1}"
 export STREAM_TRANSCODE_DELETE_SOURCE="${STREAM_TRANSCODE_DELETE_SOURCE:-1}"
-export STREAM_TRANSCODE_MAX_BATCHES="${STREAM_TRANSCODE_MAX_BATCHES:-$MAX_BATCHES}"
 export STREAM_TRANSCODE_LOCK_FILE="${STREAM_TRANSCODE_LOCK_FILE:-/tmp/hevc-transcode-helper-31.lock}"
 export STREAM_TRANSCODE_CLAIM_DIR="${STREAM_TRANSCODE_CLAIM_DIR:-/mnt/hevc_store_35/.claims}"
 export STREAM_TRANSCODE_CLAIM_MAX_AGE_SEC="${STREAM_TRANSCODE_CLAIM_MAX_AGE_SEC:-1800}"
 export STREAM_TRANSCODE_WORKER_NAME="${STREAM_TRANSCODE_WORKER_NAME:-31-t10}"
 
-exec "${STREAM_TRANSCODE_BIN:-/home/gejun/bin/transcode_stream_records.sh}"
+TRANSCODE_BIN="${STREAM_TRANSCODE_BIN:-/home/gejun/bin/transcode_stream_records.sh}"
+processed_total=0
+
+while true; do
+    tmp="$(mktemp)"
+    set +e
+    STREAM_TRANSCODE_MAX_BATCHES=1 "$TRANSCODE_BIN" | tee "$tmp"
+    rc=${PIPESTATUS[0]}
+    set -e
+
+    if (( rc != 0 )); then
+        rm -f -- "$tmp"
+        exit "$rc"
+    fi
+
+    processed_this="$(
+        grep -oE 'processed_batches=[0-9]+' "$tmp" | tail -1 | cut -d= -f2
+    )"
+    rm -f -- "$tmp"
+    processed_this="${processed_this:-0}"
+
+    if (( processed_this <= 0 )); then
+        break
+    fi
+
+    processed_total=$((processed_total + processed_this))
+    if (( REQUESTED_MAX_BATCHES > 0 && processed_total >= REQUESTED_MAX_BATCHES )); then
+        break
+    fi
+done
+
+printf 'helper_processed_batches=%s\n' "$processed_total"
