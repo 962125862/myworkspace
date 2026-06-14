@@ -1,0 +1,10 @@
+[Unit]
+Description=Ensure HEVC NFS store is mounted
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HEVC_STORE_MOUNTPOINT=/mnt/hevc_store_35
+Environment=HEVC_STORE_MOUNT_TIMEOUT_SEC=10
+ExecStart=/home/gejun/bin/ensure_hevc_store_mount.sh

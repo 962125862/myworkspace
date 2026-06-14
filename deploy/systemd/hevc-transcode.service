@@ -1,0 +1,26 @@
+[Unit]
+Description=Transcode stream raw records from shared HEVC store
+Wants=network-online.target hevc-store-mount.service
+After=network-online.target hevc-store-mount.service
+
+[Service]
+Type=oneshot
+User=gejun
+Group=gejun
+WorkingDirectory=/home/gejun
+Environment=LIBVA_DRIVER_NAME=iHD
+Environment=STREAM_TRANSCODE_SRC=/mnt/hevc_store_35/raw
+Environment=STREAM_TRANSCODE_DST=/mnt/hevc_store_35/transcoded
+Environment=STREAM_TRANSCODE_LOG_DIR=/mnt/hevc_store_35/logs
+Environment=STREAM_TRANSCODE_REQUIRE_NFS=1
+Environment=STREAM_TRANSCODE_MIN_AGE_SEC=120
+Environment=STREAM_TRANSCODE_INPUT_FPS=30
+Environment=STREAM_TRANSCODE_OUTPUT_FPS=10
+Environment=STREAM_TRANSCODE_BITRATE=1200k
+Environment=STREAM_TRANSCODE_ENCODER=hevc_vaapi
+Environment=STREAM_TRANSCODE_VAAPI_DEVICE=/dev/dri/renderD128
+Environment=STREAM_TRANSCODE_BATCH_SIZE=5
+Environment=STREAM_TRANSCODE_PARALLEL=2
+Environment=STREAM_TRANSCODE_DELETE_SOURCE=1
+Environment=STREAM_TRANSCODE_MAX_BATCHES=0
+ExecStart=/home/gejun/bin/transcode_stream_records.sh

@@ -124,6 +124,11 @@
 - `--h264-tap-drop-idr <0|1>`：tap 恢复策略
 - `--ml-worker-ctrl-map <map>`：按 `stream_id` 路由上游 `REQ_IDR`，格式如 `1:127.0.0.1:30001,2:127.0.0.1:30002`
 - `--ml-worker-ctrl-map-file <path>`：按文件配置 `stream_id -> ip:port` 映射，每行格式 `<stream_id> <ip> <port>`
+- `--compressed-record-dir <path>`：开启压缩流本地旁路录像，输出到 `<path>/raw/sXX/`
+- `--compressed-record-streams <spec>`：录像流范围，例如 `1-20` 或 `1,3,8`，默认全部
+- `--compressed-record-segment-sec <n>`：切片目标时长，默认 `1800` 秒；实际切片会等待关键帧
+- `--compressed-record-idr-interval-sec <n>`：录像内部周期 IDR，默认 `30` 秒；多路按 `stream_id` 错峰，设为 `0` 关闭
+- `--compressed-record-queue-mb <n>`：recorder 队列上限，默认 `256` MB；满了丢录像包，不阻塞主链路
 
 ### 2.1 当前推荐启动参数
 
@@ -136,6 +141,15 @@
   --zmq-bridge-bind tcp://0.0.0.0:5566 \
   --ml-worker-ctrl-map-file /home/gejun/work/my_ml_work/deploy/stream_server_ctrl_map.txt \
   -v
+```
+
+如果要开启压缩流录像，在上述命令后追加：
+
+```bash
+  --compressed-record-dir /data/stream_records \
+  --compressed-record-segment-sec 1800 \
+  --compressed-record-idr-interval-sec 30 \
+  --compressed-record-queue-mb 256
 ```
 
 默认同时监听：
@@ -175,9 +189,24 @@
 - `STREAM_NVDEC_EXTRA_HW_FRAMES`
   - 默认：`STREAM_DEFER_HW_DOWNLOAD=on` 时为 `24`，关闭延迟下载时为 `8`
   - 作用：给 NVDEC/VAAPI 多留一些硬件 surface 余量，避免 `last_frame` 仍持有硬件帧引用时把帧池顶满
-
 - 如果你不显式设置这两个环境变量，默认就已经按新逻辑运行
 - 如果想恢复旧行为，可以启动前设置 `STREAM_DEFER_HW_DOWNLOAD=off`
+
+压缩流录像相关的环境变量是：
+
+- `COMPRESSED_RECORD_DIR`
+  - 等价于 `--compressed-record-dir`
+- `COMPRESSED_RECORD_STREAMS`
+  - 等价于 `--compressed-record-streams`
+- `COMPRESSED_RECORD_SEGMENT_SEC`
+  - 等价于 `--compressed-record-segment-sec`
+- `COMPRESSED_RECORD_IDR_INTERVAL_SEC`
+  - 等价于 `--compressed-record-idr-interval-sec`
+- `COMPRESSED_RECORD_QUEUE_MB`
+  - 等价于 `--compressed-record-queue-mb`
+- `COMPRESSED_RECORD_REQUIRE_NFS`
+  - 设置为 `1` 时，`COMPRESSED_RECORD_DIR` 必须位于已经挂载的 `nfs/nfs4` 上；未挂载时 recorder 跳过写入，不落 31 本地目录
+
 - 当前 20 路真实流、`30 fps/路` 的 `IPC BGR` benchmark 结果，直接参考 `deploy/BENCHMARK_stream_server_2026-04-13.md`
 
 ### 2.3 当前主链路真正使用的参数
@@ -191,6 +220,8 @@
 - `--zmq-bridge-bind`
 - `--ml-worker-ctrl-map` 或 `--ml-worker-ctrl-map-file`
 - `-v`
+
+压缩流录像是可选能力；不开 `--compressed-record-dir` 时不启动 recorder。
 
 ## 3. strem_agent_server
 
@@ -293,4 +324,5 @@ worker Docker 日志轮转：
 - 运维入口：`deploy/OPERATIONS_CURRENT.md`
 - 链路说明：`deploy/CHAIN_ml_worker_stream_server.md`
 - 架构说明：`deploy/ARCHITECTURE_CURRENT.md`
+- 压缩流录像：`deploy/COMPRESSED_RECORDING_CURRENT.md`
 - benchmark：`deploy/BENCHMARK_stream_server_2026-04-13.md`

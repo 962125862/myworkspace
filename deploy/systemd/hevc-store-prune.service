@@ -1,0 +1,17 @@
+[Unit]
+Description=Prune HEVC store capacity
+
+[Service]
+Type=oneshot
+User=gejun
+Group=gejun
+Environment=HEVC_STORE_PRUNE_STORE_PATH=/home/gejun/hevc_store
+Environment=HEVC_STORE_PRUNE_TRANSCODE_DIR=/home/gejun/hevc_store/transcoded
+Environment=HEVC_STORE_PRUNE_RAW_DIR=/home/gejun/hevc_store/raw
+Environment=HEVC_STORE_PRUNE_LOG_DIR=/home/gejun/hevc_store/logs
+Environment=HEVC_STORE_PRUNE_CODED_TRIGGER_USED_GB=600
+Environment=HEVC_STORE_PRUNE_CODED_RETENTION_DAYS=3
+Environment=HEVC_STORE_PRUNE_RAW_TRIGGER_USED_GB=800
+Environment=HEVC_STORE_PRUNE_RAW_TARGET_USED_GB=750
+Environment=HEVC_STORE_PRUNE_TMP_MAX_AGE_MIN=360
+ExecStart=/home/gejun/bin/prune_hevc_store_capacity.sh

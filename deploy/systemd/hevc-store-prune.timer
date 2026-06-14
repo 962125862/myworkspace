@@ -1,0 +1,11 @@
+[Unit]
+Description=Run HEVC store capacity prune periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=hevc-store-prune.service
+
+[Install]
+WantedBy=timers.target

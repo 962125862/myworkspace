@@ -92,6 +92,13 @@ typedef struct {
     DecodedFrame* last_frame;      /* 最后解码帧缓存 */
     uint64_t last_idr_request_ns;  /* 主链路自动 REQ_IDR 限频时间戳 */
 
+    /* 解码停滞 watchdog：收到压缩包但 decoded 长时间不增长时请求 IDR */
+    uint64_t watchdog_last_received;
+    uint64_t watchdog_last_decoded;
+    uint64_t watchdog_last_decoded_change_ns;
+    uint64_t decode_stall_last_idr_ns;
+    uint32_t decode_stall_count;
+
     /* 线程安全 */
     pthread_mutex_t lock;          /* 保护本结构所有字段 */
 } StreamContext;

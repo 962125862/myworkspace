@@ -131,6 +131,7 @@ set(SOURCES
     src/server.c
     src/decoder.c
     src/h264_tap.c
+    src/compressed_recorder.c
     src/zmq_bridge.c
 )
 

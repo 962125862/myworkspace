@@ -1,0 +1,11 @@
+[Unit]
+Description=Run stream record transcoder periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+AccuracySec=10s
+Unit=hevc-transcode.service
+
+[Install]
+WantedBy=timers.target

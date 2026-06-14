@@ -16,6 +16,7 @@
 #include "stream.h"
 #include "server.h"
 #include "zmq_bridge.h"
+#include "compressed_recorder.h"
 
 static volatile int g_running = 1;
 static const char* kDefaultZmqBridgeIpcBind = "ipc:///tmp/stream_server_bgr.sock";
@@ -70,6 +71,12 @@ static void print_usage(const char* prog) {
     printf("  --h264-tap-drop-idr <0|1> Tap recovery policy (default 1)\n");
     printf("  --ml-worker-ctrl-map <map> Per-stream routing, e.g. 1:127.0.0.1:30001,2:127.0.0.1:30002\n");
     printf("  --ml-worker-ctrl-map-file <path>  File-based per-stream routing; each line: <stream_id> <ip> <port>\n");
+    printf("\nCompressed recording tap (raw H264/HEVC segment files):\n");
+    printf("  --compressed-record-dir <path>       Enable local compressed recording\n");
+    printf("  --compressed-record-streams <spec>   Streams to record, e.g. 1-20 or 1,3,8 (default all)\n");
+    printf("  --compressed-record-segment-sec <n>  Segment length target (default 1800)\n");
+    printf("  --compressed-record-idr-interval-sec <n>  Periodic staggered IDR interval (default 30, 0 disables)\n");
+    printf("  --compressed-record-queue-mb <n>     Recorder queue limit (default 256)\n");
     printf("  --help                Show this help\n");
 }
 
@@ -102,6 +109,9 @@ int main(int argc, char* argv[]) {
     int h264_tap_drop_idr = -1;
     char ml_worker_ctrl_map[2048] = {0};
     char ml_worker_ctrl_map_file[512] = {0};
+    CompressedRecorderConfig recorder_cfg;
+    compressed_recorder_config_defaults(&recorder_cfg);
+    int record_idr_interval_cli_set = 0;
     
     /* 解析命令行参数 */
     static struct option long_options[] = {
@@ -123,6 +133,11 @@ int main(int argc, char* argv[]) {
         {"h264-tap-drop-idr", required_argument, 0, 1009},
         {"ml-worker-ctrl-map", required_argument, 0, 1012},
         {"ml-worker-ctrl-map-file", required_argument, 0, 1013},
+        {"compressed-record-dir", required_argument, 0, 1015},
+        {"compressed-record-streams", required_argument, 0, 1016},
+        {"compressed-record-segment-sec", required_argument, 0, 1017},
+        {"compressed-record-queue-mb", required_argument, 0, 1018},
+        {"compressed-record-idr-interval-sec", required_argument, 0, 1019},
         {"help", no_argument, 0, 0},
         {0, 0, 0, 0}
     };
@@ -199,6 +214,30 @@ int main(int argc, char* argv[]) {
             case 1013: /* --ml-worker-ctrl-map-file */
                 strncpy(ml_worker_ctrl_map_file, optarg, sizeof(ml_worker_ctrl_map_file) - 1);
                 break;
+            case 1015: /* --compressed-record-dir */
+                strncpy(recorder_cfg.record_dir, optarg, sizeof(recorder_cfg.record_dir) - 1);
+                break;
+            case 1016: /* --compressed-record-streams */
+                strncpy(recorder_cfg.streams_spec, optarg, sizeof(recorder_cfg.streams_spec) - 1);
+                break;
+            case 1017: /* --compressed-record-segment-sec */
+                recorder_cfg.segment_sec = (uint32_t)atoi(optarg);
+                if (recorder_cfg.segment_sec < 1) recorder_cfg.segment_sec = 1800;
+                break;
+            case 1018: /* --compressed-record-queue-mb */
+            {
+                int mb = atoi(optarg);
+                if (mb < 1) mb = 256;
+                recorder_cfg.queue_bytes = (size_t)mb * 1024u * 1024u;
+                break;
+            }
+            case 1019: /* --compressed-record-idr-interval-sec */
+            {
+                int sec = atoi(optarg);
+                recorder_cfg.idr_interval_sec = sec > 0 ? (uint32_t)sec : 0;
+                record_idr_interval_cli_set = 1;
+                break;
+            }
             default:
                 print_usage(argv[0]);
                 return 1;
@@ -263,6 +302,36 @@ int main(int argc, char* argv[]) {
     if (ml_worker_ctrl_map_file[0]) {
         setenv("ML_WORKER_CTRL_MAP_FILE", ml_worker_ctrl_map_file, 1);
     }
+
+    const char* record_dir_env = getenv("COMPRESSED_RECORD_DIR");
+    const char* record_streams_env = getenv("COMPRESSED_RECORD_STREAMS");
+    const char* record_segment_env = getenv("COMPRESSED_RECORD_SEGMENT_SEC");
+    const char* record_queue_env = getenv("COMPRESSED_RECORD_QUEUE_MB");
+    const char* record_idr_env = getenv("COMPRESSED_RECORD_IDR_INTERVAL_SEC");
+    const char* record_require_nfs_env = getenv("COMPRESSED_RECORD_REQUIRE_NFS");
+    if (!recorder_cfg.record_dir[0] && record_dir_env && record_dir_env[0]) {
+        strncpy(recorder_cfg.record_dir, record_dir_env, sizeof(recorder_cfg.record_dir) - 1);
+    }
+    if (!recorder_cfg.streams_spec[0] && record_streams_env && record_streams_env[0]) {
+        strncpy(recorder_cfg.streams_spec, record_streams_env, sizeof(recorder_cfg.streams_spec) - 1);
+    }
+    if (record_segment_env && record_segment_env[0] && recorder_cfg.segment_sec == 1800) {
+        int sec = atoi(record_segment_env);
+        if (sec > 0) recorder_cfg.segment_sec = (uint32_t)sec;
+    }
+    if (record_queue_env && record_queue_env[0] &&
+        recorder_cfg.queue_bytes == (size_t)256 * 1024u * 1024u) {
+        int mb = atoi(record_queue_env);
+        if (mb > 0) recorder_cfg.queue_bytes = (size_t)mb * 1024u * 1024u;
+    }
+    if (!record_idr_interval_cli_set && record_idr_env && record_idr_env[0]) {
+        int sec = atoi(record_idr_env);
+        recorder_cfg.idr_interval_sec = sec > 0 ? (uint32_t)sec : 0;
+    }
+    if (record_require_nfs_env && record_require_nfs_env[0]) {
+        recorder_cfg.require_nfs_mount = atoi(record_require_nfs_env) > 0;
+    }
+    recorder_cfg.max_streams = (uint16_t)runtime_max_streams;
     
     /* 注册信号处理 */
     signal(SIGINT, signal_handler);
@@ -328,10 +397,19 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "[Main] Failed to init server\n");
         return 1;
     }
+
+    if (recorder_cfg.record_dir[0]) {
+        if (compressed_recorder_start(&recorder_cfg, NULL, NULL) != 0) {
+            fprintf(stderr, "[Main] Failed to start compressed recorder\n");
+            stream_manager_destroy(&stream_mgr);
+            return 1;
+        }
+    }
     
     /* 启动服务器 */
     if (server_start(&server) < 0) {
         fprintf(stderr, "[Main] Failed to start server\n");
+        compressed_recorder_stop();
         return 1;
     }
     
@@ -349,6 +427,7 @@ int main(int argc, char* argv[]) {
             server_get_stats(&server, &conn, &pkt, &bytes);
             printf("[Stats] Connections: %lu, Packets: %lu, Bytes: %.2f MB\n\n",
                    conn, pkt, bytes / (1024.0 * 1024.0));
+            compressed_recorder_print_stats();
             
             last_stats = time(NULL);
         }
@@ -356,6 +435,7 @@ int main(int argc, char* argv[]) {
     
     /* 停止服务器 */
     server_stop(&server);
+    compressed_recorder_stop();
     
     /* 如果启用了压力测试，输出报告 */
     const char* stress_env = getenv("STRESS_TEST");

@@ -9,6 +9,7 @@
 #include "decoder.h"
 #include "stream.h"
 #include "h264_tap.h"
+#include "compressed_recorder.h"
 #include "mlctl_cmd.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,6 +117,7 @@ typedef struct {
 
 static WorkerCtrlEndpoint g_worker_ctrl_map[MAX_STREAMS + 1];
 static pthread_once_t g_worker_ctrl_map_once = PTHREAD_ONCE_INIT;
+static StreamManager* g_stream_mgr_for_idr = NULL;
 
 static int server_runtime_max_streams(void) {
     const char* value = getenv("STREAM_MAX_STREAMS");
@@ -293,6 +295,20 @@ static void request_idr_for_stream(StreamContext* stream, const char* reason) {
     }
 }
 
+static void request_idr_for_stream_id(uint16_t stream_id, const char* reason, void* user) {
+    (void)user;
+    StreamContext* stream = stream_manager_get(g_stream_mgr_for_idr, stream_id);
+    if (stream) {
+        request_idr_for_stream(stream, reason);
+        return;
+    }
+
+    if (request_idr_best_effort_main_path(stream_id) == 0) {
+        fprintf(stderr, "[Server] Stream %u requested upstream IDR (%s)\n",
+                stream_id, reason ? reason : "unspecified");
+    }
+}
+
 static void maybe_request_idr_for_no_decode(StreamContext* stream) {
     if (!stream) {
         return;
@@ -321,6 +337,84 @@ static void maybe_request_idr_for_no_decode(StreamContext* stream) {
         char reason[96];
         snprintf(reason, sizeof(reason), "decoded=0 after %llu frames",
                  (unsigned long long)frames_received);
+        request_idr_for_stream(stream, reason);
+    }
+}
+
+static void maybe_request_idr_for_decode_stall(StreamContext* stream) {
+    if (!stream) {
+        return;
+    }
+
+    const uint64_t now_ns = monotonic_ns_server();
+    const uint64_t stall_idle_ns = 2ull * 1000ull * 1000ull * 1000ull;
+    uint64_t frames_received = 0;
+    uint64_t frames_decoded = 0;
+    uint64_t received_delta = 0;
+    uint64_t idle_ms = 0;
+    uint32_t stall_count = 0;
+    int should_request = 0;
+
+    pthread_mutex_lock(&stream->lock);
+    frames_received = stream->frames_received;
+    frames_decoded = stream->decode_stats.frames_decoded;
+
+    if (stream->state != STREAM_STATE_ACTIVE || !stream->decoder_initialized || frames_decoded == 0) {
+        stream->watchdog_last_received = frames_received;
+        stream->watchdog_last_decoded = frames_decoded;
+        stream->watchdog_last_decoded_change_ns = now_ns;
+        pthread_mutex_unlock(&stream->lock);
+        return;
+    }
+
+    if (stream->watchdog_last_decoded_change_ns == 0) {
+        stream->watchdog_last_received = frames_received;
+        stream->watchdog_last_decoded = frames_decoded;
+        stream->watchdog_last_decoded_change_ns = now_ns;
+        pthread_mutex_unlock(&stream->lock);
+        return;
+    }
+
+    if (frames_decoded != stream->watchdog_last_decoded) {
+        stream->watchdog_last_received = frames_received;
+        stream->watchdog_last_decoded = frames_decoded;
+        stream->watchdog_last_decoded_change_ns = now_ns;
+        stream->decode_stall_count = 0;
+        pthread_mutex_unlock(&stream->lock);
+        return;
+    }
+
+    received_delta = frames_received - stream->watchdog_last_received;
+    if (now_ns >= stream->watchdog_last_decoded_change_ns) {
+        idle_ms = (now_ns - stream->watchdog_last_decoded_change_ns) / 1000000ull;
+    }
+
+    uint64_t backoff_ns = 2ull * 1000ull * 1000ull * 1000ull;
+    if (stream->decode_stall_count == 1) {
+        backoff_ns = 5ull * 1000ull * 1000ull * 1000ull;
+    } else if (stream->decode_stall_count >= 2) {
+        backoff_ns = 10ull * 1000ull * 1000ull * 1000ull;
+    }
+
+    if (received_delta >= 30 &&
+        now_ns - stream->watchdog_last_decoded_change_ns >= stall_idle_ns &&
+        (stream->decode_stall_last_idr_ns == 0 ||
+         now_ns - stream->decode_stall_last_idr_ns >= backoff_ns)) {
+        stream->decode_stall_last_idr_ns = now_ns;
+        stream->decode_stall_count++;
+        stall_count = stream->decode_stall_count;
+        should_request = 1;
+    }
+
+    pthread_mutex_unlock(&stream->lock);
+
+    if (should_request) {
+        char reason[160];
+        snprintf(reason, sizeof(reason),
+                 "decode_stalled: received_delta=%llu decoded_delta=0 idle_ms=%llu count=%u",
+                 (unsigned long long)received_delta,
+                 (unsigned long long)idle_ms,
+                 stall_count);
         request_idr_for_stream(stream, reason);
     }
 }
@@ -390,6 +484,11 @@ static void handle_packet(TcpServer* server, ClientConn* client,
 
                     pthread_mutex_lock(&stream->lock);
                     stream->last_idr_request_ns = 0;
+                    stream->watchdog_last_received = 0;
+                    stream->watchdog_last_decoded = 0;
+                    stream->watchdog_last_decoded_change_ns = monotonic_ns_server();
+                    stream->decode_stall_last_idr_ns = 0;
+                    stream->decode_stall_count = 0;
                     pthread_mutex_unlock(&stream->lock);
                     
                     /* 自动检测或强制指定解码器 */
@@ -403,6 +502,8 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                            header->stream_id, info.width, info.height, info.fps,
                            info.codec, info.chroma, info.bitdepth, info.video_format,
                            info.color_space, info.color_range);
+
+                    compressed_recorder_on_stream_start(header->stream_id, &info);
 
                     /*
                      * Late-join recovery:
@@ -456,6 +557,8 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                 if (g_h264_tap_started) {
                     h264_tap_publish(header->stream_id, payload, (int)payload_len);
                 }
+
+                compressed_recorder_on_video(header->stream_id, payload, payload_len);
                 
                 /* 先解码源流 */
                 int ret = stream_decode_video(stream, payload, payload_len);
@@ -469,6 +572,7 @@ static void handle_packet(TcpServer* server, ClientConn* client,
                     }
                 }
                 maybe_request_idr_for_no_decode(stream);
+                maybe_request_idr_for_decode_stall(stream);
                 
                 /* 如果启用了压力测试，复制到虚拟流 */
                 if (g_stress_test_enabled) {
@@ -478,6 +582,7 @@ static void handle_packet(TcpServer* server, ClientConn* client,
             break;
             
         case TCP_MSG_TYPE_STREAM_STOP:
+            compressed_recorder_on_stream_stop(header->stream_id);
             /* 关闭解码器 */
             stream_close_decoder(stream);
             stream_set_state(stream, STREAM_STATE_IDLE);
@@ -698,6 +803,7 @@ int server_init(TcpServer* server, const ServerConfig* config, StreamManager* st
     memset(server, 0, sizeof(*server));
     memcpy(&server->config, config, sizeof(*config));
     server->stream_mgr = stream_mgr;
+    g_stream_mgr_for_idr = stream_mgr;
     server->listen_fd = -1;
     server->running = false;
     
@@ -708,6 +814,8 @@ int server_init(TcpServer* server, const ServerConfig* config, StreamManager* st
 
 int server_start(TcpServer* server) {
     if (!server) return -1;
+
+    compressed_recorder_set_request_idr_callback(request_idr_for_stream_id, NULL);
     
     /* 创建监听socket */
     server->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
