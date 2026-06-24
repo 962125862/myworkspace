@@ -48,10 +48,6 @@ typedef struct {
 } ZmqBgrFrame;
 
 typedef struct {
-    ZmqBgrFrame* frame;
-} ZmqBgrCacheEntry;
-
-typedef struct {
     int requested;
     int x;
     int y;
@@ -69,14 +65,74 @@ typedef struct {
     int applied;
 } ZmqResolvedRoi;
 
+#define ZMQ_BRIDGE_WORKER_COUNT 4
+#define ZMQ_BRIDGE_QUEUE_CAP 128
+#define ZMQ_BRIDGE_RESULT_CAP 128
+#define ZMQ_BRIDGE_DEFAULT_CLIENT_TIMEOUT_MS 1000
+#define ZMQ_BRIDGE_DEFAULT_SERVER_WAIT_MS 30
+#define ZMQ_BRIDGE_MAX_SERVER_WAIT_MS 50
+#define ZMQ_BRIDGE_DEADLINE_MARGIN_MS 100
+#define ZMQ_BRIDGE_MAX_SEND_DEADLINE_MS 800
+
+typedef struct ZmqBridgeRequest {
+    uint8_t* identity;
+    size_t identity_len;
+    int have_delim;
+    char* cmd;
+    size_t cmd_len;
+    char* json;
+    size_t json_len;
+    char request_id[65];
+    int stream_id;
+    int client_timeout_ms;
+    int server_wait_ms;
+    uint64_t send_deadline_ns;
+    ZmqRoiRequest roi_req;
+    int roi_parse;
+} ZmqBridgeRequest;
+
+typedef struct ZmqBridgeResponse {
+    uint8_t* identity;
+    size_t identity_len;
+    int have_delim;
+    int ok;
+    char* meta;
+    size_t meta_len;
+    char* payload;
+    size_t payload_len;
+    ZmqBgrFrame* frame;
+    uint64_t send_deadline_ns;
+} ZmqBridgeResponse;
+
+typedef struct {
+    ZmqBridgeRequest* items[ZMQ_BRIDGE_QUEUE_CAP];
+    size_t head;
+    size_t tail;
+    size_t count;
+    int stopped;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+} ZmqRequestQueue;
+
+typedef struct {
+    ZmqBridgeResponse* items[ZMQ_BRIDGE_RESULT_CAP];
+    size_t head;
+    size_t tail;
+    size_t count;
+    pthread_mutex_t mu;
+} ZmqResponseQueue;
+
 typedef struct {
     StreamManager* mgr;
     char bind_addr[256];
     char ipc_bind_addr[256];
     volatile int* running;
     void* zmq_ctx;
-    ZmqBgrCacheEntry* cache_entries;
-    size_t cache_count;
+    ZmqRequestQueue requests;
+    ZmqResponseQueue responses;
+    pthread_t workers[ZMQ_BRIDGE_WORKER_COUNT];
+    int worker_count;
+    int workers_started;
 
     pthread_mutex_t start_mu;
     pthread_cond_t start_cv;
@@ -88,6 +144,10 @@ static pthread_mutex_t g_zmq_bridge_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_zmq_bridge_thread;
 static ZmqBridgeArg* g_zmq_bridge_arg = NULL;
 static int g_zmq_bridge_started = 0;
+
+static void free_bgr_frame(ZmqBgrFrame* f);
+static void free_bridge_request(ZmqBridgeRequest* req);
+static void free_bridge_response(ZmqBridgeResponse* resp);
 
 static const char* color_space_name(uint32_t color_space) {
     switch (color_space) {
@@ -147,8 +207,6 @@ static int bind_router_endpoint(void* router, const char* addr) {
     return -1;
 }
 
-static void free_bgr_frame(ZmqBgrFrame* f);
-
 static int send_frame(void* sock, const void* data, size_t len, int more) {
     zmq_msg_t msg;
     zmq_msg_init_size(&msg, len);
@@ -161,25 +219,14 @@ static int send_frame(void* sock, const void* data, size_t len, int more) {
     return (rc >= 0) ? 0 : -1;
 }
 
-static void free_bgr_frame_msg(void* data, void* hint) {
-    (void)data;
-    free_bgr_frame((ZmqBgrFrame*)hint);
-}
-
 static int send_bgr_frame_owned(void* sock, ZmqBgrFrame* frame) {
     if (!sock || !frame || !frame->bgr) {
-        return -1;
-    }
-
-    zmq_msg_t msg;
-    if (zmq_msg_init_data(&msg, frame->bgr, frame->bgr_sz,
-                          free_bgr_frame_msg, frame) != 0) {
         free_bgr_frame(frame);
         return -1;
     }
 
-    const int rc = zmq_msg_send(&msg, sock, 0);
-    zmq_msg_close(&msg);
+    const int rc = send_frame(sock, frame->bgr, frame->bgr_sz, 0);
+    free_bgr_frame(frame);
     return (rc >= 0) ? 0 : -1;
 }
 
@@ -270,6 +317,53 @@ static int parse_json_int_key(const char* json, size_t len, const char* key, int
     return 1;
 }
 
+static int parse_json_string_key(const char* json, size_t len, const char* key,
+                                 char* out, size_t out_sz) {
+    if (!json || len == 0 || !key || !out || out_sz == 0) {
+        return 0;
+    }
+
+    out[0] = '\0';
+    const char* end = json + len;
+    const char* p = find_json_key(json, end, key);
+    if (!p) {
+        return 0;
+    }
+
+    p += strlen(key);
+    p = skip_json_ws(p, end);
+    if (p >= end || *p != ':') {
+        return 0;
+    }
+    p++;
+    p = skip_json_ws(p, end);
+    if (p >= end || *p != '"') {
+        return 0;
+    }
+    p++;
+
+    size_t n = 0;
+    int escaped = 0;
+    while (p < end) {
+        char c = *p++;
+        if (escaped) {
+            escaped = 0;
+        } else if (c == '\\') {
+            escaped = 1;
+            continue;
+        } else if (c == '"') {
+            out[n] = '\0';
+            return 1;
+        }
+        if (n + 1 < out_sz) {
+            out[n++] = c;
+        }
+    }
+
+    out[n] = '\0';
+    return n > 0;
+}
+
 static int parse_stream_id_from_json(const char* json, size_t len) {
     int v = 0;
     if (parse_json_int_key(json, len, "\"stream_id\"", &v) && v > 0) {
@@ -284,6 +378,29 @@ static int parse_timeout_ms_from_json(const char* json, size_t len, int default_
         return v;
     }
     return default_ms;
+}
+
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int parse_client_timeout_ms_from_json(const char* json, size_t len) {
+    int v = 0;
+    if (parse_json_int_key(json, len, "\"client_timeout_ms\"", &v) && v > 0) {
+        return v;
+    }
+    return parse_timeout_ms_from_json(json, len, ZMQ_BRIDGE_DEFAULT_CLIENT_TIMEOUT_MS);
+}
+
+static int parse_server_wait_ms_from_json(const char* json, size_t len) {
+    int v = 0;
+    if (parse_json_int_key(json, len, "\"server_wait_ms\"", &v)) {
+        return clamp_int(v, 0, ZMQ_BRIDGE_MAX_SERVER_WAIT_MS);
+    }
+    return clamp_int(parse_timeout_ms_from_json(json, len, ZMQ_BRIDGE_DEFAULT_SERVER_WAIT_MS),
+                     0, ZMQ_BRIDGE_MAX_SERVER_WAIT_MS);
 }
 
 static int parse_roi_from_json(const char* json, size_t len, ZmqRoiRequest* roi) {
@@ -386,47 +503,9 @@ static void free_bgr_frame(ZmqBgrFrame* f) {
     free(f);
 }
 
-static void retain_bgr_frame(ZmqBgrFrame* f) {
-    if (!f) return;
-    atomic_fetch_add_explicit(&f->refcount, 1u, memory_order_relaxed);
-}
-
-static int cached_bgr_frame_matches(const ZmqBgrFrame* frame, uint16_t stream_id,
-                                    const DecodedFrame* snapshot,
-                                    const StreamInfo* info) {
-    if (!frame || !snapshot || !info) {
-        return 0;
-    }
-
-    return frame->stream_id == stream_id &&
-           frame->width == snapshot->width &&
-           frame->height == snapshot->height &&
-           frame->pts == snapshot->pts &&
-           frame->key_frame == (snapshot->key_frame ? 1 : 0) &&
-           frame->color_space == info->color_space &&
-           frame->color_range == info->color_range &&
-           frame->source_format == snapshot->format;
-}
-
-static void clear_cached_bgr_frames(ZmqBridgeArg* arg) {
-    if (!arg || !arg->cache_entries) {
-        return;
-    }
-
-    for (size_t i = 0; i < arg->cache_count; i++) {
-        if (arg->cache_entries[i].frame) {
-            free_bgr_frame(arg->cache_entries[i].frame);
-            arg->cache_entries[i].frame = NULL;
-        }
-    }
-
-    free(arg->cache_entries);
-    arg->cache_entries = NULL;
-    arg->cache_count = 0;
-}
-
 static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, ZmqBgrFrame** out) {
     if (!stream || !out) return -1;
+    (void)arg;
 
     *out = NULL;
 
@@ -443,33 +522,26 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
         return -1;
     }
     snapshot = decoder_ref_frame(lf);
-    if (snapshot) {
-        info_snapshot = stream->info;
-        stream_id = stream->stream_id;
-        source_format = snapshot->format;
-    }
-    pthread_mutex_unlock(&stream->lock);
-
     if (!snapshot) {
+        pthread_mutex_unlock(&stream->lock);
         return -1;
     }
+    info_snapshot = stream->info;
+    stream_id = stream->stream_id;
+    source_format = snapshot->format;
 
-    if (arg && stream_id < arg->cache_count) {
-        ZmqBgrFrame* cached = arg->cache_entries[stream_id].frame;
-        if (cached_bgr_frame_matches(cached, stream_id, snapshot, &info_snapshot)) {
-            retain_bgr_frame(cached);
-            decoder_free_frame(snapshot);
-            *out = cached;
-            return 0;
-        }
-    }
-
+    /*
+     * Keep conversion serialized per stream. A burst can otherwise make several
+     * workers download/convert references to the same VAAPI frame concurrently.
+     */
     if (decoder_convert_format_with_info(NULL, snapshot, &info_snapshot,
                                          &converted, DECODE_FMT_BGR24) != 0) {
         decoder_free_frame(snapshot);
+        pthread_mutex_unlock(&stream->lock);
         return -1;
     }
     decoder_free_frame(snapshot);
+    pthread_mutex_unlock(&stream->lock);
 
     ZmqBgrFrame* frame = (ZmqBgrFrame*)calloc(1, sizeof(*frame));
     if (!frame) {
@@ -500,17 +572,8 @@ static int convert_last_frame_to_bgr(StreamContext* stream, ZmqBridgeArg* arg, Z
         return -1;
     }
 
-    if (arg && stream_id < arg->cache_count) {
-        ZmqBgrFrame* old = arg->cache_entries[stream_id].frame;
-        arg->cache_entries[stream_id].frame = frame;
-        retain_bgr_frame(frame);
-        if (old) {
-            free_bgr_frame(old);
-        }
-    }
-
-    static int color_log_count = 0;
-    if (color_log_count++ < 4) {
+    static atomic_int color_log_count = 0;
+    if (atomic_fetch_add_explicit(&color_log_count, 1, memory_order_relaxed) < 4) {
         printf("[ZMQ] stream %u BGR conversion using %s/%s via unified decoder path\n",
                stream_id,
                color_space_name(info_snapshot.color_space),
@@ -625,6 +688,438 @@ static int crop_bgr_frame(const ZmqBgrFrame* src, const ZmqResolvedRoi* roi,
     return 0;
 }
 
+static char* copy_bytes_as_string(const void* data, size_t len) {
+    char* out = (char*)malloc(len + 1u);
+    if (!out) {
+        return NULL;
+    }
+    if (len > 0 && data) {
+        memcpy(out, data, len);
+    }
+    out[len] = '\0';
+    return out;
+}
+
+static uint8_t* copy_bytes(const void* data, size_t len) {
+    if (len == 0) {
+        return NULL;
+    }
+    uint8_t* out = (uint8_t*)malloc(len);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, data, len);
+    return out;
+}
+
+static int copy_msg_bytes(zmq_msg_t* msg, uint8_t** out, size_t* out_len) {
+    if (!msg || !out || !out_len) {
+        return -1;
+    }
+    *out_len = zmq_msg_size(msg);
+    *out = copy_bytes(zmq_msg_data(msg), *out_len);
+    if (*out_len > 0 && !*out) {
+        return -1;
+    }
+    return 0;
+}
+
+static void request_queue_init(ZmqRequestQueue* q) {
+    memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mu, NULL);
+    pthread_cond_init(&q->cv, NULL);
+}
+
+static void response_queue_init(ZmqResponseQueue* q) {
+    memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mu, NULL);
+}
+
+static int request_queue_push(ZmqRequestQueue* q, ZmqBridgeRequest* req) {
+    int ok = 0;
+    pthread_mutex_lock(&q->mu);
+    if (!q->stopped && q->count < ZMQ_BRIDGE_QUEUE_CAP) {
+        q->items[q->tail] = req;
+        q->tail = (q->tail + 1u) % ZMQ_BRIDGE_QUEUE_CAP;
+        q->count++;
+        pthread_cond_signal(&q->cv);
+        ok = 1;
+    }
+    pthread_mutex_unlock(&q->mu);
+    return ok ? 0 : -1;
+}
+
+static ZmqBridgeRequest* request_queue_pop(ZmqRequestQueue* q) {
+    pthread_mutex_lock(&q->mu);
+    while (!q->stopped && q->count == 0) {
+        pthread_cond_wait(&q->cv, &q->mu);
+    }
+    if (q->count == 0) {
+        pthread_mutex_unlock(&q->mu);
+        return NULL;
+    }
+    ZmqBridgeRequest* req = q->items[q->head];
+    q->items[q->head] = NULL;
+    q->head = (q->head + 1u) % ZMQ_BRIDGE_QUEUE_CAP;
+    q->count--;
+    pthread_mutex_unlock(&q->mu);
+    return req;
+}
+
+static void request_queue_stop(ZmqRequestQueue* q) {
+    pthread_mutex_lock(&q->mu);
+    q->stopped = 1;
+    pthread_cond_broadcast(&q->cv);
+    pthread_mutex_unlock(&q->mu);
+}
+
+static int response_queue_push(ZmqResponseQueue* q, ZmqBridgeResponse* resp) {
+    int ok = 0;
+    pthread_mutex_lock(&q->mu);
+    if (q->count < ZMQ_BRIDGE_RESULT_CAP) {
+        q->items[q->tail] = resp;
+        q->tail = (q->tail + 1u) % ZMQ_BRIDGE_RESULT_CAP;
+        q->count++;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&q->mu);
+    return ok ? 0 : -1;
+}
+
+static ZmqBridgeResponse* response_queue_pop(ZmqResponseQueue* q) {
+    pthread_mutex_lock(&q->mu);
+    if (q->count == 0) {
+        pthread_mutex_unlock(&q->mu);
+        return NULL;
+    }
+    ZmqBridgeResponse* resp = q->items[q->head];
+    q->items[q->head] = NULL;
+    q->head = (q->head + 1u) % ZMQ_BRIDGE_RESULT_CAP;
+    q->count--;
+    pthread_mutex_unlock(&q->mu);
+    return resp;
+}
+
+static void free_bridge_request(ZmqBridgeRequest* req) {
+    if (!req) {
+        return;
+    }
+    free(req->identity);
+    free(req->cmd);
+    free(req->json);
+    free(req);
+}
+
+static void free_bridge_response(ZmqBridgeResponse* resp) {
+    if (!resp) {
+        return;
+    }
+    free(resp->identity);
+    free(resp->meta);
+    free(resp->payload);
+    if (resp->frame) {
+        free_bgr_frame(resp->frame);
+    }
+    free(resp);
+}
+
+static void request_queue_destroy(ZmqRequestQueue* q) {
+    request_queue_stop(q);
+    ZmqBridgeRequest* req = NULL;
+    while ((req = request_queue_pop(q)) != NULL) {
+        free_bridge_request(req);
+    }
+    pthread_cond_destroy(&q->cv);
+    pthread_mutex_destroy(&q->mu);
+}
+
+static void response_queue_destroy(ZmqResponseQueue* q) {
+    ZmqBridgeResponse* resp = NULL;
+    while ((resp = response_queue_pop(q)) != NULL) {
+        free_bridge_response(resp);
+    }
+    pthread_mutex_destroy(&q->mu);
+}
+
+static uint64_t send_deadline_from_timeout(uint64_t recv_ns, int client_timeout_ms) {
+    int deadline_ms = client_timeout_ms - ZMQ_BRIDGE_DEADLINE_MARGIN_MS;
+    if (deadline_ms <= 0) {
+        deadline_ms = client_timeout_ms;
+    }
+    if (deadline_ms <= 0) {
+        deadline_ms = 1;
+    }
+    if (deadline_ms > ZMQ_BRIDGE_MAX_SEND_DEADLINE_MS) {
+        deadline_ms = ZMQ_BRIDGE_MAX_SEND_DEADLINE_MS;
+    }
+    return recv_ns + (uint64_t)deadline_ms * 1000000ull;
+}
+
+static ZmqBridgeRequest* build_bridge_request(zmq_msg_t* identity_msg, int have_delim,
+                                              zmq_msg_t* cmd_msg, zmq_msg_t* json_msg) {
+    ZmqBridgeRequest* req = (ZmqBridgeRequest*)calloc(1, sizeof(*req));
+    if (!req) {
+        return NULL;
+    }
+    if (copy_msg_bytes(identity_msg, &req->identity, &req->identity_len) != 0) {
+        free_bridge_request(req);
+        return NULL;
+    }
+    req->have_delim = have_delim;
+    req->cmd_len = zmq_msg_size(cmd_msg);
+    req->cmd = copy_bytes_as_string(zmq_msg_data(cmd_msg), req->cmd_len);
+    req->json_len = zmq_msg_size(json_msg);
+    req->json = copy_bytes_as_string(zmq_msg_data(json_msg), req->json_len);
+    if (!req->cmd || !req->json) {
+        free_bridge_request(req);
+        return NULL;
+    }
+
+    req->stream_id = parse_stream_id_from_json(req->json, req->json_len);
+    req->client_timeout_ms = parse_client_timeout_ms_from_json(req->json, req->json_len);
+    req->server_wait_ms = parse_server_wait_ms_from_json(req->json, req->json_len);
+    (void)parse_json_string_key(req->json, req->json_len, "\"request_id\"",
+                                req->request_id, sizeof(req->request_id));
+    req->roi_parse = parse_roi_from_json(req->json, req->json_len, &req->roi_req);
+    req->send_deadline_ns = send_deadline_from_timeout(monotonic_ns(), req->client_timeout_ms);
+    return req;
+}
+
+static ZmqBridgeResponse* bridge_response_take_request(ZmqBridgeRequest* req) {
+    ZmqBridgeResponse* resp = (ZmqBridgeResponse*)calloc(1, sizeof(*resp));
+    if (!resp) {
+        return NULL;
+    }
+    resp->identity = req->identity;
+    resp->identity_len = req->identity_len;
+    resp->have_delim = req->have_delim;
+    resp->send_deadline_ns = req->send_deadline_ns;
+    req->identity = NULL;
+    req->identity_len = 0;
+    return resp;
+}
+
+static int response_set_text_payload(ZmqBridgeResponse* resp, const char* text) {
+    const size_t len = text ? strlen(text) : 0;
+    resp->payload = copy_bytes_as_string(text ? text : "", len);
+    if (!resp->payload) {
+        return -1;
+    }
+    resp->payload_len = len;
+    return 0;
+}
+
+static ZmqBridgeResponse* make_error_response(ZmqBridgeRequest* req, const char* error) {
+    ZmqBridgeResponse* resp = bridge_response_take_request(req);
+    if (!resp) {
+        return NULL;
+    }
+    resp->ok = 0;
+    char meta[512];
+    int meta_n = snprintf(meta, sizeof(meta),
+                          "{\"request_id\":\"%s\",\"stream_id\":%d,\"error\":\"%s\"}",
+                          req->request_id, req->stream_id, error ? error : "error");
+    if (meta_n < 0) meta_n = 0;
+    if ((size_t)meta_n >= sizeof(meta)) meta_n = (int)sizeof(meta) - 1;
+    resp->meta = copy_bytes_as_string(meta, (size_t)meta_n);
+    resp->meta_len = (size_t)meta_n;
+    if (!resp->meta || response_set_text_payload(resp, error ? error : "error") != 0) {
+        free_bridge_response(resp);
+        return NULL;
+    }
+    return resp;
+}
+
+static ZmqBridgeResponse* make_ping_response(ZmqBridgeRequest* req) {
+    ZmqBridgeResponse* resp = bridge_response_take_request(req);
+    if (!resp) {
+        return NULL;
+    }
+    resp->ok = 1;
+    resp->meta = copy_bytes_as_string("{}", 2);
+    resp->meta_len = 2;
+    if (!resp->meta || response_set_text_payload(resp, "{}") != 0) {
+        free_bridge_response(resp);
+        return NULL;
+    }
+    return resp;
+}
+
+static ZmqBridgeResponse* make_bgr_response(ZmqBridgeRequest* req, ZmqBgrFrame* reply_frame,
+                                            const ZmqResolvedRoi* roi) {
+    ZmqBridgeResponse* resp = bridge_response_take_request(req);
+    if (!resp) {
+        free_bgr_frame(reply_frame);
+        return NULL;
+    }
+    resp->ok = 1;
+    resp->frame = reply_frame;
+
+    char meta[768];
+    int meta_n = snprintf(
+        meta, sizeof(meta),
+        "{\"request_id\":\"%s\",\"stream_id\":%d,\"width\":%d,\"height\":%d,\"stride\":%d,"
+        "\"source_width\":%d,\"source_height\":%d,"
+        "\"roi_x\":%d,\"roi_y\":%d,\"roi_width\":%d,\"roi_height\":%d,"
+        "\"roi_applied\":%s,"
+        "\"pts\":%lld,\"mono_ns\":%llu,\"key_frame\":%d,\"pixfmt\":\"bgr24\","
+        "\"color_space\":\"%s#%u\",\"color_range\":\"%s#%u\"}",
+        req->request_id,
+        (int)reply_frame->stream_id,
+        reply_frame->width, reply_frame->height, reply_frame->stride,
+        reply_frame->source_width, reply_frame->source_height,
+        reply_frame->roi_x, reply_frame->roi_y,
+        reply_frame->width, reply_frame->height,
+        (roi && roi->applied) ? "true" : "false",
+        (long long)reply_frame->pts,
+        (unsigned long long)reply_frame->mono_ns,
+        reply_frame->key_frame,
+        color_space_name(reply_frame->color_space), reply_frame->color_space,
+        color_range_name(reply_frame->color_range), reply_frame->color_range);
+    if (meta_n < 0) meta_n = 0;
+    if ((size_t)meta_n >= sizeof(meta)) meta_n = (int)sizeof(meta) - 1;
+    resp->meta = copy_bytes_as_string(meta, (size_t)meta_n);
+    resp->meta_len = (size_t)meta_n;
+    if (!resp->meta) {
+        free_bridge_response(resp);
+        return NULL;
+    }
+    return resp;
+}
+
+static ZmqBridgeResponse* handle_get_latest_bgr_request(ZmqBridgeArg* arg, ZmqBridgeRequest* req) {
+    if (req->roi_parse < 0) {
+        return make_error_response(req, "bad roi");
+    }
+
+    StreamContext* stream = stream_manager_get(arg->mgr, (uint16_t)req->stream_id);
+    if (!stream) {
+        return make_error_response(req, "bad stream_id");
+    }
+
+    ZmqBgrFrame* frame = NULL;
+    if (convert_last_frame_to_bgr(stream, NULL, &frame) != 0 && req->server_wait_ms > 0) {
+        const uint64_t deadline = monotonic_ns() + (uint64_t)req->server_wait_ms * 1000000ull;
+        while (monotonic_ns() < deadline) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+            nanosleep(&ts, NULL);
+            if (convert_last_frame_to_bgr(stream, NULL, &frame) == 0) {
+                break;
+            }
+        }
+    }
+
+    if (!frame) {
+        return make_error_response(req, "no frame yet");
+    }
+
+    ZmqResolvedRoi roi;
+    ZmqBgrFrame* reply_frame = frame;
+    if (resolve_bgr_roi(frame, &req->roi_req, &roi) != 0) {
+        free_bgr_frame(frame);
+        return make_error_response(req, "bad roi");
+    }
+
+    if (roi.applied) {
+        ZmqBgrFrame* cropped = NULL;
+        if (crop_bgr_frame(frame, &roi, &cropped) != 0) {
+            free_bgr_frame(frame);
+            return make_error_response(req, "roi crop failed");
+        }
+        free_bgr_frame(frame);
+        reply_frame = cropped;
+    }
+
+    return make_bgr_response(req, reply_frame, &roi);
+}
+
+static void* zmq_bridge_worker_thread(void* p) {
+    ZmqBridgeArg* arg = (ZmqBridgeArg*)p;
+    for (;;) {
+        ZmqBridgeRequest* req = request_queue_pop(&arg->requests);
+        if (!req) {
+            break;
+        }
+
+        ZmqBridgeResponse* resp = handle_get_latest_bgr_request(arg, req);
+        free_bridge_request(req);
+        if (!resp) {
+            continue;
+        }
+        if (monotonic_ns() > resp->send_deadline_ns ||
+            response_queue_push(&arg->responses, resp) != 0) {
+            free_bridge_response(resp);
+        }
+    }
+    return NULL;
+}
+
+static int start_bridge_workers(ZmqBridgeArg* arg) {
+    arg->worker_count = ZMQ_BRIDGE_WORKER_COUNT;
+    for (int i = 0; i < arg->worker_count; i++) {
+        if (pthread_create(&arg->workers[i], NULL, zmq_bridge_worker_thread, arg) != 0) {
+            request_queue_stop(&arg->requests);
+            for (int j = 0; j < i; j++) {
+                pthread_join(arg->workers[j], NULL);
+            }
+            arg->worker_count = 0;
+            arg->workers_started = 0;
+            return -1;
+        }
+    }
+    arg->workers_started = 1;
+    return 0;
+}
+
+static void stop_bridge_workers(ZmqBridgeArg* arg) {
+    request_queue_stop(&arg->requests);
+    if (!arg->workers_started) {
+        return;
+    }
+    for (int i = 0; i < arg->worker_count; i++) {
+        pthread_join(arg->workers[i], NULL);
+    }
+    arg->workers_started = 0;
+}
+
+static int send_bridge_response(void* router, ZmqBridgeResponse* resp) {
+    if (!router || !resp || !resp->identity || !resp->meta) {
+        return -1;
+    }
+
+    if (send_frame(router, resp->identity, resp->identity_len, 1) != 0) {
+        return -1;
+    }
+    if (resp->have_delim && send_frame(router, "", 0, 1) != 0) {
+        return -1;
+    }
+
+    const char* status = resp->ok ? "OK" : "ERR";
+    if (send_frame(router, status, strlen(status), 1) != 0 ||
+        send_frame(router, resp->meta, resp->meta_len, 1) != 0) {
+        return -1;
+    }
+
+    if (resp->ok && resp->frame) {
+        int rc = send_bgr_frame_owned(router, resp->frame);
+        resp->frame = NULL;
+        return rc;
+    }
+
+    return send_frame(router, resp->payload ? resp->payload : "",
+                      resp->payload ? resp->payload_len : 0, 0);
+}
+
+static void drain_bridge_responses(void* router, ZmqBridgeArg* arg) {
+    ZmqBridgeResponse* resp = NULL;
+    while ((resp = response_queue_pop(&arg->responses)) != NULL) {
+        if (monotonic_ns() <= resp->send_deadline_ns) {
+            (void)send_bridge_response(router, resp);
+        }
+        free_bridge_response(resp);
+    }
+}
+
 static void* zmq_bridge_thread(void* p) {
     ZmqBridgeArg* arg = (ZmqBridgeArg*)p;
 
@@ -650,13 +1145,28 @@ static void* zmq_bridge_thread(void* p) {
         return NULL;
     }
 
-    int sndhwm = 2;
-    int rcvhwm = 100;
+    int sndhwm = 1;
+    int rcvhwm = 1;
+    int sndtimeo = 0;
     zmq_setsockopt(router, ZMQ_SNDHWM, &sndhwm, sizeof(sndhwm));
     zmq_setsockopt(router, ZMQ_RCVHWM, &rcvhwm, sizeof(rcvhwm));
+    zmq_setsockopt(router, ZMQ_SNDTIMEO, &sndtimeo, sizeof(sndtimeo));
 
     if (bind_router_endpoint(router, arg->bind_addr) != 0 ||
         bind_router_endpoint(router, arg->ipc_bind_addr) != 0) {
+        zmq_close(router);
+        zmq_ctx_term(ctx);
+        cleanup_ipc_bind_addr(arg->bind_addr);
+        cleanup_ipc_bind_addr(arg->ipc_bind_addr);
+        pthread_mutex_lock(&arg->start_mu);
+        arg->start_ok = 0;
+        arg->start_done = 1;
+        pthread_cond_signal(&arg->start_cv);
+        pthread_mutex_unlock(&arg->start_mu);
+        return NULL;
+    }
+
+    if (start_bridge_workers(arg) != 0) {
         zmq_close(router);
         zmq_ctx_term(ctx);
         cleanup_ipc_bind_addr(arg->bind_addr);
@@ -677,17 +1187,33 @@ static void* zmq_bridge_thread(void* p) {
 
     if (has_bind_addr(arg->bind_addr) && has_bind_addr(arg->ipc_bind_addr)) {
         fprintf(stdout,
-                "[ZMQ] bridge enabled (ROUTER) tcp=%s ipc=%s, output=bgr24\n",
-                arg->bind_addr, arg->ipc_bind_addr);
+                "[ZMQ] bridge enabled (ROUTER) tcp=%s ipc=%s, output=bgr24, workers=%d\n",
+                arg->bind_addr, arg->ipc_bind_addr, arg->worker_count);
     } else if (has_bind_addr(arg->bind_addr)) {
-        fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24\n",
-                arg->bind_addr);
+        fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24, workers=%d\n",
+                arg->bind_addr, arg->worker_count);
     } else {
-        fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24\n",
-                arg->ipc_bind_addr);
+        fprintf(stdout, "[ZMQ] bridge enabled (ROUTER) bind=%s, output=bgr24, workers=%d\n",
+                arg->ipc_bind_addr, arg->worker_count);
     }
 
     while (!arg->running || *arg->running) {
+        drain_bridge_responses(router, arg);
+
+        zmq_pollitem_t items[] = {
+            { .socket = router, .fd = 0, .events = ZMQ_POLLIN, .revents = 0 },
+        };
+        int poll_rc = zmq_poll(items, 1, 10);
+        if (poll_rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (poll_rc == 0 || !(items[0].revents & ZMQ_POLLIN)) {
+            continue;
+        }
+
         zmq_msg_t f0;
         if (recv_frame(router, &f0) < 0) {
             if (errno == EINTR) continue;
@@ -734,104 +1260,36 @@ static void* zmq_bridge_thread(void* p) {
 
         const char* cmd = (const char*)zmq_msg_data(&cmd_msg);
         size_t cmd_len = zmq_msg_size(&cmd_msg);
-        const char* json = (const char*)zmq_msg_data(&json_msg);
-        size_t json_len = zmq_msg_size(&json_msg);
-
-        (void)send_frame(router, zmq_msg_data(&f0), zmq_msg_size(&f0), 1);
-        if (have_delim) {
-            (void)send_frame(router, "", 0, 1);
-        }
+        ZmqBridgeRequest* req = build_bridge_request(&f0, have_delim, &cmd_msg, &json_msg);
+        ZmqBridgeResponse* direct_resp = NULL;
 
         if (cmd_len == 4 && memcmp(cmd, "PING", 4) == 0) {
-            (void)send_frame(router, "OK", 2, 1);
-            (void)send_frame(router, "{}", 2, 0);
+            if (req) {
+                direct_resp = make_ping_response(req);
+            }
         } else if (cmd_len == strlen("GET_LATEST_BGR") &&
                    memcmp(cmd, "GET_LATEST_BGR", cmd_len) == 0) {
-            int stream_id = parse_stream_id_from_json(json, json_len);
-            int timeout_ms = parse_timeout_ms_from_json(json, json_len, 1000);
-            ZmqRoiRequest roi_req;
-            int roi_parse = parse_roi_from_json(json, json_len, &roi_req);
-            if (roi_parse < 0) {
-                (void)send_frame(router, "ERR", 3, 1);
-                (void)send_frame(router, "bad roi", strlen("bad roi"), 0);
-            } else {
-                StreamContext* stream = stream_manager_get(arg->mgr, (uint16_t)stream_id);
-                if (!stream) {
-                    (void)send_frame(router, "ERR", 3, 1);
-                    (void)send_frame(router, "bad stream_id", strlen("bad stream_id"), 0);
-                } else {
-                    ZmqBgrFrame* frame = NULL;
-                    if (convert_last_frame_to_bgr(stream, arg, &frame) != 0 && timeout_ms != 0) {
-                        const uint64_t deadline =
-                            monotonic_ns() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000000ull;
-                        while (timeout_ms < 0 || monotonic_ns() < deadline) {
-                            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
-                            nanosleep(&ts, NULL);
-                            if (convert_last_frame_to_bgr(stream, arg, &frame) == 0) {
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!frame) {
-                        (void)send_frame(router, "ERR", 3, 1);
-                        (void)send_frame(router, "no frame yet", strlen("no frame yet"), 0);
-                    } else {
-                        ZmqResolvedRoi roi;
-                        ZmqBgrFrame* reply_frame = frame;
-                        if (resolve_bgr_roi(frame, &roi_req, &roi) != 0) {
-                            free_bgr_frame(frame);
-                            (void)send_frame(router, "ERR", 3, 1);
-                            (void)send_frame(router, "bad roi", strlen("bad roi"), 0);
-                        } else {
-                            if (roi.applied) {
-                                ZmqBgrFrame* cropped = NULL;
-                                if (crop_bgr_frame(frame, &roi, &cropped) != 0) {
-                                    free_bgr_frame(frame);
-                                    (void)send_frame(router, "ERR", 3, 1);
-                                    (void)send_frame(router, "roi crop failed",
-                                                     strlen("roi crop failed"), 0);
-                                    goto request_done;
-                                }
-                                free_bgr_frame(frame);
-                                reply_frame = cropped;
-                            }
-
-                            char meta[512];
-                            int meta_n = snprintf(
-                                meta, sizeof(meta),
-                                "{\"stream_id\":%d,\"width\":%d,\"height\":%d,\"stride\":%d,"
-                                "\"source_width\":%d,\"source_height\":%d,"
-                                "\"roi_x\":%d,\"roi_y\":%d,\"roi_width\":%d,\"roi_height\":%d,"
-                                "\"roi_applied\":%s,"
-                                "\"pts\":%lld,\"mono_ns\":%llu,\"key_frame\":%d,\"pixfmt\":\"bgr24\","
-                                "\"color_space\":\"%s#%u\",\"color_range\":\"%s#%u\"}",
-                                (int)reply_frame->stream_id,
-                                reply_frame->width, reply_frame->height, reply_frame->stride,
-                                reply_frame->source_width, reply_frame->source_height,
-                                reply_frame->roi_x, reply_frame->roi_y,
-                                reply_frame->width, reply_frame->height,
-                                roi.applied ? "true" : "false",
-                                (long long)reply_frame->pts,
-                                (unsigned long long)reply_frame->mono_ns,
-                                reply_frame->key_frame,
-                                color_space_name(reply_frame->color_space), reply_frame->color_space,
-                                color_range_name(reply_frame->color_range), reply_frame->color_range);
-                            if (meta_n < 0) meta_n = 0;
-                            if ((size_t)meta_n >= sizeof(meta)) meta_n = (int)sizeof(meta) - 1;
-
-                            (void)send_frame(router, "OK", 2, 1);
-                            (void)send_frame(router, meta, (size_t)meta_n, 1);
-                            (void)send_bgr_frame_owned(router, reply_frame);
-                        }
-request_done:
-                        ;
-                    }
-                }
+            if (req && request_queue_push(&arg->requests, req) == 0) {
+                req = NULL;
+            } else if (req) {
+                direct_resp = make_error_response(req, "busy");
             }
-        } else {
-            (void)send_frame(router, "ERR", 3, 1);
-            (void)send_frame(router, "unknown cmd", strlen("unknown cmd"), 0);
+        } else if (req) {
+            direct_resp = make_error_response(req, "unknown cmd");
+        }
+
+        if (direct_resp) {
+            if (monotonic_ns() <= direct_resp->send_deadline_ns) {
+                (void)send_bridge_response(router, direct_resp);
+            }
+            free_bridge_response(direct_resp);
+        }
+        if (req) {
+            free_bridge_request(req);
+        }
+
+        if (!req && !direct_resp && cmd_len != strlen("GET_LATEST_BGR")) {
+            /* build_bridge_request failed; nothing reliable can be returned. */
         }
 
         zmq_msg_close(&f0);
@@ -839,11 +1297,15 @@ request_done:
         zmq_msg_close(&json_msg);
     }
 
+    drain_bridge_responses(router, arg);
+    stop_bridge_workers(arg);
+    drain_bridge_responses(router, arg);
     zmq_close(router);
     zmq_ctx_term(ctx);
     cleanup_ipc_bind_addr(arg->bind_addr);
     cleanup_ipc_bind_addr(arg->ipc_bind_addr);
-    clear_cached_bgr_frames(arg);
+    request_queue_destroy(&arg->requests);
+    response_queue_destroy(&arg->responses);
     free(arg);
     return NULL;
 }
@@ -870,12 +1332,8 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, const char* ipc_
     if (has_bind_addr(ipc_bind_addr)) {
         strncpy(arg->ipc_bind_addr, ipc_bind_addr, sizeof(arg->ipc_bind_addr) - 1);
     }
-    arg->cache_count = (size_t)mgr->max_streams + 1u;
-    arg->cache_entries = (ZmqBgrCacheEntry*)calloc(arg->cache_count, sizeof(*arg->cache_entries));
-    if (!arg->cache_entries) {
-        free(arg);
-        return -1;
-    }
+    request_queue_init(&arg->requests);
+    response_queue_init(&arg->responses);
 
     pthread_mutex_init(&arg->start_mu, NULL);
     pthread_cond_init(&arg->start_cv, NULL);
@@ -884,7 +1342,8 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, const char* ipc_
     if (pthread_create(&th, NULL, zmq_bridge_thread, arg) != 0) {
         pthread_cond_destroy(&arg->start_cv);
         pthread_mutex_destroy(&arg->start_mu);
-        clear_cached_bgr_frames(arg);
+        request_queue_destroy(&arg->requests);
+        response_queue_destroy(&arg->responses);
         free(arg);
         return -1;
     }
@@ -901,7 +1360,8 @@ int zmq_bridge_start(StreamManager* mgr, const char* bind_addr, const char* ipc_
 
     if (!ok) {
         pthread_join(th, NULL);
-        clear_cached_bgr_frames(arg);
+        request_queue_destroy(&arg->requests);
+        response_queue_destroy(&arg->responses);
         free(arg);
         return -1;
     }
